@@ -1,0 +1,81 @@
+services:
+  blockbrain-mcp:
+    # Use the pre-built image from GHCR (default).
+    # To build locally instead, comment out `image` and uncomment `build`.
+    image: ghcr.io/theblockbrain/blockbrain-mcp:latest
+    # build: .
+
+    restart: unless-stopped
+
+    ports:
+      - "${MCP_PORT:-8080}:${MCP_PORT:-8080}"
+
+    # Load all values from .env first; the environment block below makes
+    # every supported variable explicit with an inline description so it is
+    # clear what is required vs. optional.
+    env_file: .env
+
+    environment:
+      # ── Identity provider — pick exactly ONE of paths A, B, or C ────────
+
+      # A) Entra ID (Azure AD) — Single-Tenant [recommended default]
+      #    Get the Directory (tenant) ID from Azure Portal → App registration → Overview.
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}                 # required (path A/B)
+
+      # B) Entra ID — Multi-Tenant allow-list
+      #    Comma-separated tenant UUIDs; only active when AZURE_TENANT_ID=common.
+      AZURE_ALLOWED_TENANTS: ${AZURE_ALLOWED_TENANTS:-}     # required if AZURE_TENANT_ID=common
+
+      # C) Any other OIDC provider (Zitadel, Auth0, Okta, Keycloak, …)
+      #    Leave blank when AZURE_TENANT_ID is set.
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}                 # required (path C)
+
+      # Override the JWKS URI. Derived automatically from the issuer when omitted.
+      OIDC_JWKS_URI: ${OIDC_JWKS_URI:-}                     # optional
+
+      # ── Resource server identity ─────────────────────────────────────────
+
+      # The `aud` claim value the server enforces on every incoming token.
+      # Entra: the Application ID URI from "Expose an API" (e.g. api://<client-id>).
+      # Others: an https URL identifying this server.
+      MCP_RESOURCE_IDENTIFIER: ${MCP_RESOURCE_IDENTIFIER}   # required
+
+      # Public URL at which this server is reachable (used in .well-known metadata).
+      # Required when MCP_RESOURCE_IDENTIFIER is not an http(s) URL (Entra case).
+      MCP_PUBLIC_BASE_URL: ${MCP_PUBLIC_BASE_URL:-}          # conditional
+
+      # Comma-separated scopes the server requires on every token (e.g. mcp.access).
+      MCP_REQUIRED_SCOPES: ${MCP_REQUIRED_SCOPES:-}          # optional
+
+      # ── Server ───────────────────────────────────────────────────────────
+
+      # Human-readable server name advertised in MCP metadata.
+      MCP_SERVER_NAME: ${MCP_SERVER_NAME:-Blockbrain MCP Template}  # optional
+
+      # Bind address inside the container — keep 0.0.0.0 for Docker.
+      MCP_HOST: ${MCP_HOST:-0.0.0.0}                         # optional
+
+      # Port the server listens on (must match the ports mapping above).
+      MCP_PORT: ${MCP_PORT:-8080}                             # optional
+
+      # Log level: DEBUG | INFO | WARNING | ERROR
+      MCP_LOG_LEVEL: ${MCP_LOG_LEVEL:-INFO}                  # optional
+
+      # ── Tool-specific ────────────────────────────────────────────────────
+
+      # Brave Search API key — required only if the web_search / research_topic
+      # tools are kept. Free tier: 2 000 req/month at brave.com/search/api/
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}                      # optional
+
+      # Daily per-user cap for the research_topic tool.
+      RATE_LIMIT_RESEARCH_PER_DAY: ${RATE_LIMIT_RESEARCH_PER_DAY:-50}  # optional
+
+    healthcheck:
+      # The discovery endpoint responds without authentication — a 200 means
+      # the server is up and configured correctly.
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:${MCP_PORT:-8080}/.well-known/oauth-protected-resource/mcp')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -20,29 +20,47 @@ What you get:
 
 ---
 
-## 60-second quickstart (Entra)
+## Quickstart
+
+### Option A — Docker Compose (recommended for deployment)
 
 ```bash
-# 1. prerequisites: Python 3.12, uv, cloudflared
+# 1. configure
+cp .env.example .env
+$EDITOR .env    # fill in at minimum: AZURE_TENANT_ID, MCP_RESOURCE_IDENTIFIER,
+                #   MCP_PUBLIC_BASE_URL (see "What every config value does" below)
+
+# 2. run
+docker compose up -d
+
+# 3. verify — the discovery endpoint responds without authentication
+curl -s http://localhost:8080/.well-known/oauth-protected-resource/mcp | jq
+# → { "resource": "...", "authorization_servers": ["https://login.microsoftonline.com/..."] }
+```
+
+To build the image locally instead of pulling from GHCR, open `compose.yaml`,
+comment out the `image:` line and uncomment `build: .`, then run
+`docker compose up -d --build`.
+
+### Option B — uv (local dev + cloudflared tunnel)
+
+```bash
+# prerequisites: Python 3.12, uv, cloudflared
 brew install uv cloudflared
 
-# 2. install
 uv sync
-
-# 3. configure
 cp .env.example .env
-$EDITOR .env          # set AZURE_TENANT_ID, MCP_RESOURCE_IDENTIFIER, (optional) BRAVE_API_KEY
+$EDITOR .env
 
-# 4. run — ONE command: starts server + public HTTPS tunnel and wires
-#    the tunnel URL into the server's .well-known metadata automatically.
+# starts server + public HTTPS tunnel; wires tunnel URL into .well-known metadata
 make serve
 ```
 
-`make serve` prints a banner with the public tunnel URL and the `/mcp` endpoint
-to paste into Blockbrain. Ctrl+C shuts both processes down cleanly.
+`make serve` prints the public tunnel URL and the `/mcp` endpoint to paste into
+Blockbrain. Ctrl+C shuts both processes cleanly.
 
-If you just want the server without a tunnel (e.g. pure local testing with a
-token from `az account get-access-token`), use `make dev` instead.
+For local testing without a tunnel (e.g. with `az account get-access-token`),
+use `make dev` instead.
 
 ---
 
@@ -95,17 +113,24 @@ A full step-by-step for each supported provider lives in
 
 ## What every config value does
 
-| Env var                      | Required? | What it is                                                                                   |
-|------------------------------|-----------|----------------------------------------------------------------------------------------------|
-| `AZURE_TENANT_ID`            | either/or | Tenant UUID for Entra single-tenant; or `common` for multi-tenant                            |
-| `AZURE_ALLOWED_TENANTS`      | if common | Comma-separated tenant UUIDs allowed when `AZURE_TENANT_ID=common`                           |
-| `OIDC_ISSUER_URL`            | either/or | Issuer URL for non-Entra providers (Zitadel, Auth0, Okta, Keycloak, ...)                     |
-| `OIDC_JWKS_URI`              | optional  | Override. Defaults to `<issuer>/.well-known/jwks.json` for generic OIDC                      |
-| `MCP_RESOURCE_IDENTIFIER`    | required  | Value that must appear in the JWT's `aud`. For Entra: your Application ID URI                |
-| `MCP_REQUIRED_SCOPES`        | optional  | Comma-separated scopes every call must carry                                                 |
-| `MCP_PUBLIC_BASE_URL`        | conditional | Required when `MCP_RESOURCE_IDENTIFIER` isn't an http(s) URL (Entra case). Your public URL |
-| `MCP_HOST` / `MCP_PORT`      | optional  | Bind address, default `0.0.0.0:8080`                                                         |
-| `BRAVE_API_KEY`              | optional  | Only needed if you keep the `web_search` / `research_topic` tools                            |
+All variables can be set in `.env` (copied from `.env.example`). The
+`compose.yaml` file mirrors this table with inline comments.
+
+| Env var                       | Required?   | Default                    | What it is                                                                                    |
+|-------------------------------|-------------|----------------------------|-----------------------------------------------------------------------------------------------|
+| `AZURE_TENANT_ID`             | either/or   | —                          | Tenant UUID for Entra single-tenant; or `common` for multi-tenant (path A/B)                 |
+| `AZURE_ALLOWED_TENANTS`       | if common   | —                          | Comma-separated tenant UUIDs allowed when `AZURE_TENANT_ID=common`                           |
+| `OIDC_ISSUER_URL`             | either/or   | —                          | Issuer URL for non-Entra providers (Zitadel, Auth0, Okta, Keycloak, …) — path C             |
+| `OIDC_JWKS_URI`               | optional    | derived from issuer        | Override JWKS endpoint. Defaults to `<issuer>/.well-known/jwks.json`                         |
+| `MCP_RESOURCE_IDENTIFIER`     | required    | —                          | Value that must appear in the JWT `aud`. For Entra: the Application ID URI (`api://<id>`)    |
+| `MCP_PUBLIC_BASE_URL`         | conditional | —                          | Required when `MCP_RESOURCE_IDENTIFIER` is not an http(s) URL (Entra case). Public server URL |
+| `MCP_REQUIRED_SCOPES`         | optional    | (none)                     | Comma-separated scopes every token must carry (e.g. `mcp.access`)                            |
+| `MCP_SERVER_NAME`             | optional    | `Blockbrain MCP Template`  | Human-readable name advertised in MCP metadata                                                |
+| `MCP_HOST`                    | optional    | `0.0.0.0`                  | Bind address (keep `0.0.0.0` in Docker)                                                       |
+| `MCP_PORT`                    | optional    | `8080`                     | Port the server listens on                                                                     |
+| `MCP_LOG_LEVEL`               | optional    | `INFO`                     | `DEBUG` / `INFO` / `WARNING` / `ERROR`                                                        |
+| `BRAVE_API_KEY`               | optional    | (none)                     | Brave Search API key — only needed for `web_search` / `research_topic` tools                 |
+| `RATE_LIMIT_RESEARCH_PER_DAY` | optional    | `50`                       | Daily per-user cap for the `research_topic` tool                                              |
 
 ---
 
@@ -168,7 +193,10 @@ blockbrain-mcp/
 │   ├── ARCHITECTURE.md    # deeper design dive
 │   ├── PROVIDERS.md       # Entra / Zitadel / Auth0 / Okta / Keycloak setup
 │   └── ADDING_A_TOOL.md   # step-by-step for extending the server
-├── scripts/dev-tunnel.sh          # cloudflared tunnel helper
+├── compose.yaml           # Docker Compose with full env-var reference
+├── Dockerfile             # multi-stage build (uv builder → slim runtime)
+├── .env.example           # all config vars with comments
+├── scripts/dev-tunnel.sh  # cloudflared tunnel helper
 ├── pyproject.toml
 └── Makefile
 ```
