@@ -11,7 +11,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
 # Now copy source and install the project itself (no deps re-resolved).
+# README.md is referenced by pyproject.toml's readme field — hatchling needs it.
 COPY src/ ./src/
+COPY README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
