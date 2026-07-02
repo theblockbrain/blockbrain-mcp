@@ -101,7 +101,7 @@ A full step-by-step for each supported provider lives in
 2. Enter the server URL (the `/mcp` endpoint from `make tunnel` or your prod URL)
 3. Blockbrain calls `GET /.well-known/oauth-protected-resource/mcp` on your
    server (Tier 1 discovery) and shows you the callback URL for Azure.
-   Format: `https://integrations.<env>.theblockbrain.ai/api/v1/mcp-servers/<configId>/oauth/callback`
+   Format: `https://integrations.theblockbrain.ai/api/v1/mcp-servers/<configId>/oauth/callback`
 4. Copy that URL into Azure (step 5 above)
 5. Paste **Application (client) ID** and **Client secret** into the
    Blockbrain form (Blockbrain encrypts both with AES-256-GCM)

@@ -40,7 +40,7 @@ standard OAuth 2.1 authorization-code + PKCE flow against the provider.
 6. **Certificates & secrets → New client secret** — copy the Value now
 7. **Authentication → Add a platform → Web → Redirect URI**
    - Paste the callback URL Blockbrain shows after you create the MCP-server
-     record (`https://integrations.<env>.theblockbrain.ai/api/v1/mcp-servers/<configId>/oauth/callback`)
+     record (`https://integrations.theblockbrain.ai/api/v1/mcp-servers/<configId>/oauth/callback`)
 
 ```env
 AZURE_TENANT_ID=<directory-tenant-id>
