@@ -19,6 +19,11 @@ Provider configuration — pick ONE of these three paths:
 
 Always required:
          MCP_RESOURCE_IDENTIFIER=<your server audience>   # e.g. api://blockbrain-mcp
+
+Local testing escape hatch (off by default — see MCP_AUTH_DISABLED below):
+         MCP_AUTH_DISABLED=true
+   Disables OAuth/JWT auth entirely so the MCP Inspector can connect without
+   Azure/Entra or a tunnel. NEVER set this in a deployed/exposed environment.
 """
 
 from functools import lru_cache
@@ -66,6 +71,19 @@ class Settings(BaseSettings):
         description=(
             "JWKS URI. Defaults to `<issuer>/.well-known/jwks.json` for "
             "generic OIDC, or to Azure's JWKS for Entra."
+        ),
+    )
+
+    # -------- Local dev / testing -------------------------------------------
+    mcp_auth_disabled: bool = Field(
+        default=False,
+        description=(
+            "DANGER: disables OAuth/JWT authentication entirely when true. "
+            "The /mcp endpoint then accepts unauthenticated requests. "
+            "Intended ONLY for local testing with the MCP Inspector (no "
+            "Azure/Entra, no tunnel required). Default is false — auth is "
+            "always enforced unless this is explicitly set. NEVER enable "
+            "this in a deployed or network-exposed setup."
         ),
     )
 
@@ -192,6 +210,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _exactly_one_provider(self) -> "Settings":
+        if self.mcp_auth_disabled:
+            # Auth is off entirely — no upstream IdP is ever contacted, so
+            # provider configuration is irrelevant and not required. This is
+            # the local-testing-with-MCP-Inspector escape hatch.
+            return self
         if self.is_entra and self.oidc_issuer_url:
             raise ValueError(
                 "Set EITHER AZURE_TENANT_ID (for Entra) OR OIDC_ISSUER_URL "

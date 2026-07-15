@@ -129,6 +129,7 @@ All variables can be set in `.env` (copied from `.env.example`). The
 | `MCP_HOST`                    | optional    | `0.0.0.0`                  | Bind address (keep `0.0.0.0` in Docker)                                                       |
 | `MCP_PORT`                    | optional    | `8080`                     | Port the server listens on                                                                     |
 | `MCP_LOG_LEVEL`               | optional    | `INFO`                     | `DEBUG` / `INFO` / `WARNING` / `ERROR`                                                        |
+| `MCP_AUTH_DISABLED`           | optional    | `false`                    | **DANGER** — disables OAuth/JWT auth entirely. Local Inspector testing only, never deployed   |
 | `BRAVE_API_KEY`               | optional    | (none)                     | Brave Search API key — only needed for `web_search` / `research_topic` tools                 |
 | `RATE_LIMIT_RESEARCH_PER_DAY` | optional    | `50`                       | Daily per-user cap for the `research_topic` tool                                              |
 
@@ -226,6 +227,39 @@ For a full-stack test with a real Entra token, issue one from your tenant
 
 ---
 
+## Local testing without auth (MCP Inspector)
+
+For quick local iteration you don't need Azure/Entra, a tunnel, or any real
+tokens at all — set `MCP_AUTH_DISABLED=true` and point the
+[MCP Inspector](https://github.com/modelcontextprotocol/inspector) straight
+at your local server:
+
+```bash
+cp .env.example .env
+# in .env: MCP_AUTH_DISABLED=true, MCP_HOST=127.0.0.1
+uv run blockbrain-mcp
+# in another terminal:
+npx @modelcontextprotocol/inspector
+# → connect to http://localhost:8080/mcp, no auth needed
+```
+
+**This is for local testing only.** With auth disabled, `/mcp` accepts
+*any* request, no token required — the server prints a loud warning banner
+on startup, and an even louder one if `MCP_HOST` is not a localhost address
+(the default `0.0.0.0` included). Never set `MCP_AUTH_DISABLED=true` in a
+deployed or network-reachable environment. Leave it unset (or `false`) for
+everything else — that is the default and enforces auth exactly like before
+this flag existed.
+
+Note: tools that resolve the caller's identity (`whoami`, `web_search`,
+`read_url`, `research_topic`) still call `get_user_context()`, which raises
+`NotAuthenticatedError` when there is no bearer token to read claims from —
+auth-disabled mode does not fabricate a user identity. It's meant for
+exercising transport/discovery and tools that don't need caller identity;
+it does not make the identity-dependent tools callable without a token.
+
+---
+
 ## Tests & linting
 
 ```bash
@@ -244,6 +278,10 @@ make fmt     # uv run ruff format + --fix
 - Tokens are never logged
 - Rate limits in `research_topic` are in-memory for this template; use Redis
   for production
+- `MCP_AUTH_DISABLED` is `false` by default — auth must be explicitly opted
+  out of, never explicitly opted into. It's meant for local MCP Inspector
+  testing only and logs a loud startup warning (louder still if the server
+  isn't bound to localhost) so it can't be silently left on
 
 ---
 
