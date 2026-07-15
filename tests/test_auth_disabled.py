@@ -25,20 +25,26 @@ _INIT_BODY = {
     },
 }
 _TOOLS_LIST_BODY = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+_WHOAMI_CALL_BODY = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {"name": "whoami", "arguments": {}},
+}
 _MCP_HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/event-stream",
 }
 
 
-async def _post_tools_list(monkeypatch: pytest.MonkeyPatch) -> httpx.Response:
-    """Drive the real streamable-HTTP handshake (initialize -> tools/list),
-    with no Authorization header on either request, and return the response
-    to the tools/list call.
+async def _post_via_handshake(body: dict) -> httpx.Response:
+    """Drive the real streamable-HTTP handshake (initialize -> `body`), with
+    no Authorization header on either request, and return the response to
+    the second request.
 
     A rejecting server can 401 on `initialize` itself; a permissive one needs
-    the session-id round-trip to get to `tools/list` at all — so we always
-    complete the handshake and only assert on the final response.
+    the session-id round-trip to get further at all — so we always complete
+    the handshake and only assert on the final response.
     """
     get_settings.cache_clear()
     app = build_server().http_app(path="/mcp")
@@ -52,7 +58,11 @@ async def _post_tools_list(monkeypatch: pytest.MonkeyPatch) -> httpx.Response:
             return init_resp
 
         session_headers = {**_MCP_HEADERS, "mcp-session-id": init_resp.headers["mcp-session-id"]}
-        return await client.post("/mcp", json=_TOOLS_LIST_BODY, headers=session_headers)
+        return await client.post("/mcp", json=body, headers=session_headers)
+
+
+async def _post_tools_list(monkeypatch: pytest.MonkeyPatch) -> httpx.Response:
+    return await _post_via_handshake(_TOOLS_LIST_BODY)
 
 
 @pytest.mark.asyncio
@@ -91,3 +101,22 @@ def test_auth_disabled_does_not_register_well_known_routes(monkeypatch: pytest.M
     app = build_server().http_app(path="/mcp")
     paths = [getattr(r, "path", "") for r in app.routes]
     assert not any("oauth-authorization-server" in p for p in paths), paths
+
+
+@pytest.mark.asyncio
+async def test_auth_disabled_whoami_call_returns_dev_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MCP_AUTH_DISABLED=true -> identity-dependent tools are actually callable
+
+    (not just tools/list): whoami must succeed with a synthetic, obviously-fake
+    dev identity instead of raising NotAuthenticatedError.
+    """
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    resp = await _post_via_handshake(_WHOAMI_CALL_BODY)
+
+    assert resp.status_code == 200
+    body = resp.text
+    assert '"isError":false' in body
+    assert '"user_id":"local-dev"' in body
+    assert '"email":"dev@localhost"' in body

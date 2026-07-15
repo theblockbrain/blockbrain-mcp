@@ -251,12 +251,18 @@ deployed or network-reachable environment. Leave it unset (or `false`) for
 everything else — that is the default and enforces auth exactly like before
 this flag existed.
 
-Note: tools that resolve the caller's identity (`whoami`, `web_search`,
-`read_url`, `research_topic`) still call `get_user_context()`, which raises
-`NotAuthenticatedError` when there is no bearer token to read claims from —
-auth-disabled mode does not fabricate a user identity. It's meant for
-exercising transport/discovery and tools that don't need caller identity;
-it does not make the identity-dependent tools callable without a token.
+Tools that resolve the caller's identity (`whoami`, `web_search`, `read_url`,
+`research_topic`) still call `get_user_context()`. With auth disabled and no
+real bearer token present, that returns a synthetic **dev identity**
+(`user_id="local-dev"`, `email="dev@localhost"`, `name="Local Dev User
+(MCP_AUTH_DISABLED)"`) instead of raising — the values are deliberately
+obvious placeholders so they can never be mistaken for a real user in logs or
+downstream code. This lets the Inspector actually *call* every tool locally,
+not just list them. If a real token does show up while auth is disabled, its
+claims are used as-is; the dev identity is only a fallback for when nothing
+identifies the caller. The fallback is gated strictly on
+`MCP_AUTH_DISABLED=true` — with auth enabled (the default), a missing or
+unidentifiable token still raises `NotAuthenticatedError` exactly as before.
 
 ---
 

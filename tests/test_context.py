@@ -91,3 +91,60 @@ def test_missing_identity_raises() -> None:
         pytest.raises(NotAuthenticatedError),
     ):
         get_user_context()
+
+
+# ---------------------------------------------------------------------------
+# MCP_AUTH_DISABLED dev-identity fallback — gated strictly on the setting,
+# never on "token is None" alone. The tests above (test_missing_token_raises,
+# test_missing_identity_raises) run with auth enabled (conftest default) and
+# must keep raising; these run with auth explicitly disabled and must not.
+# ---------------------------------------------------------------------------
+
+
+def test_missing_token_returns_dev_identity_when_auth_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from blockbrain_mcp.config import get_settings
+
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    get_settings.cache_clear()
+    with (
+        patch("blockbrain_mcp.context.get_access_token", return_value=None),
+        patch("blockbrain_mcp.context.get_http_headers", return_value={}),
+    ):
+        ctx = get_user_context()
+
+    assert ctx.user_id == "local-dev"
+    assert ctx.email == "dev@localhost"
+
+
+def test_missing_identity_returns_dev_identity_when_auth_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from blockbrain_mcp.config import get_settings
+
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    get_settings.cache_clear()
+    with (
+        patch("blockbrain_mcp.context.get_access_token", return_value=_FakeToken({})),
+        patch("blockbrain_mcp.context.get_http_headers", return_value={}),
+    ):
+        ctx = get_user_context()
+
+    assert ctx.user_id == "local-dev"
+
+
+def test_real_claims_still_win_over_dev_identity_when_auth_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token that DOES carry claims (e.g. Inspector configured with a real
+    bearer anyway) is used as-is — the dev identity is only a fallback for
+    when nothing identifies the caller, not a blanket override."""
+    from blockbrain_mcp.config import get_settings
+
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    get_settings.cache_clear()
+    ctx = _ctx_with({"sub": "real-user", "email": "real@example.com"})
+
+    assert ctx.user_id == "real-user"
+    assert ctx.email == "real@example.com"

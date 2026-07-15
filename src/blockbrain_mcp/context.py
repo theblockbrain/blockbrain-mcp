@@ -12,6 +12,13 @@ and fall back to Blockbrain's `X-Blockbrain-*` headers when the JWT is thin
 (that header is injected by the Blockbrain MCP client when `sendUserContext=true`
 on the MCP-server config).
 
+When `MCP_AUTH_DISABLED=true` (local MCP Inspector testing only — see
+config.py) and no real identity can be resolved, we return an obviously-fake
+synthetic dev identity instead of raising, so identity-dependent tools stay
+callable without a token. That fallback is gated STRICTLY on
+`mcp_auth_disabled`; in the normal authed path a missing/unidentifiable
+token still raises `NotAuthenticatedError` exactly as before.
+
 ⭐ CUSTOMIZE HERE — if your provider uses non-standard claim names, map them
    below.
 """
@@ -19,6 +26,8 @@ on the MCP-server config).
 from dataclasses import dataclass
 
 from fastmcp.server.dependencies import get_access_token, get_http_headers
+
+from .config import get_settings
 
 # Zitadel-specific claim name
 ZITADEL_ORG_CLAIM = "urn:zitadel:iam:org:id"
@@ -45,6 +54,24 @@ class NotAuthenticatedError(RuntimeError):
     """Raised when a tool is invoked without a valid bearer token."""
 
 
+# Synthetic identity used ONLY when MCP_AUTH_DISABLED=true and no real user
+# identity could be resolved. Values are deliberately obvious placeholders —
+# never derived from any request data — so they can't be mistaken for a
+# genuine user in logs or downstream code.
+_DEV_USER_ID = "local-dev"
+_DEV_USER_NAME = "Local Dev User (MCP_AUTH_DISABLED)"
+_DEV_USER_EMAIL = "dev@localhost"
+
+
+def _dev_user_context() -> UserContext:
+    return UserContext(
+        user_id=_DEV_USER_ID,
+        org_id=None,
+        email=_DEV_USER_EMAIL,
+        name=_DEV_USER_NAME,
+    )
+
+
 def _pick_user_id(claims: dict, headers: dict) -> str | None:
     # Prefer stable provider user IDs, then fall back to sub, then header.
     return claims.get(ENTRA_OBJECT_ID_CLAIM) or claims.get("sub") or headers.get(USER_ID_HEADER)
@@ -69,6 +96,10 @@ def _pick_org(claims: dict, headers: dict) -> str | None:
 def get_user_context() -> UserContext:
     token = get_access_token()
     if token is None:
+        # Gated strictly on mcp_auth_disabled, never on "token is None" alone
+        # -- in the normal authed path a missing token must keep raising.
+        if get_settings().mcp_auth_disabled:
+            return _dev_user_context()
         raise NotAuthenticatedError("No access token in request context.")
 
     claims = token.claims or {}
@@ -76,6 +107,12 @@ def get_user_context() -> UserContext:
 
     user_id = _pick_user_id(claims, headers)
     if not user_id:
+        # A token showed up (unusual with auth disabled, since no
+        # AuthProvider validates/attaches one) but carried no identifiable
+        # claims -- still gated on mcp_auth_disabled, not on the absence
+        # of user_id alone.
+        if get_settings().mcp_auth_disabled:
+            return _dev_user_context()
         raise NotAuthenticatedError(
             "Token has no user identifier (expected `oid`, `sub`, or X-Blockbrain-User-Id)."
         )
