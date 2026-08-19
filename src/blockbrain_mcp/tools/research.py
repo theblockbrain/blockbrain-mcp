@@ -5,8 +5,13 @@ This is the "wow" moment of the template: one call produces a structured
 research brief the LLM can reason over. It is also a useful example of how to
 chain tools server-side (fewer LLM round-trips, coherent results).
 
+Search results are attacker-influenced input: anyone who can rank a URL in the
+search index gets it fetched. Every fetch therefore goes through `read_url`, which
+applies the `url_guard` checks, and `READ_URL_ALLOWED_DOMAINS` narrows the reachable
+hosts further when you know them up front.
+
 ⭐ REPLACEABLE / ADAPTABLE — customize the synthesis step to match your domain
-   (e.g., summarize with an LLM, enforce a domain whitelist, emit citations in
+   (e.g., summarize with an LLM, tighten the domain allow-list, emit citations in
    a specific format).
 
 Per-user daily rate-limiting is implemented in-memory as a Blockbrain-friendly
@@ -23,6 +28,7 @@ import structlog
 from pydantic import BaseModel
 
 from ..config import get_settings
+from ..logging_setup import safe_url
 from ._base import get_user_context
 from .read_url import PageContent, read_url
 from .web_search import web_search
@@ -71,16 +77,21 @@ async def research_topic(topic: str, depth: int = 3) -> ResearchBrief:
     search = await web_search(query=topic, max_results=depth)
 
     pages: list[PageContent] = []
-    # Fetch pages concurrently; skip individual failures.
+    # Fetch pages concurrently, skipping individual failures. A rejected URL is
+    # an ordinary outcome here, not an error worth failing the whole brief for.
     results = await asyncio.gather(
         *(read_url(r.url) for r in search.results),
         return_exceptions=True,
     )
-    for r in results:
-        if isinstance(r, PageContent):
-            pages.append(r)
+    for hit, result in zip(search.results, results, strict=True):
+        if isinstance(result, PageContent):
+            pages.append(result)
         else:
-            log.warning("research_topic.read_failed", error=str(r))
+            log.warning(
+                "research_topic.read_failed",
+                url=safe_url(hit.url),
+                error_type=type(result).__name__,
+            )
 
     sources = [
         ResearchSource(

@@ -1,4 +1,4 @@
-.PHONY: help sync dev tunnel test lint fmt clean
+.PHONY: help sync dev tunnel test lint fmt audit clean
 
 help:  ## Show this help.
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -27,6 +27,9 @@ test:  ## Run pytest.
 lint:  ## Ruff lint + format check.
 	uv run ruff check
 	uv run ruff format --check
+
+audit:  ## Check dependencies against known advisories (same as CI).
+	uv run pip-audit --skip-editable --progress-spinner off
 
 fmt:  ## Ruff format + auto-fix.
 	uv run ruff format

@@ -104,6 +104,7 @@ openai_api_key: str = Field(default="", description="OpenAI API key.")
 ```python
 # tool
 from ..config import get_settings
+
 ...
 key = get_settings().openai_api_key
 if not key:

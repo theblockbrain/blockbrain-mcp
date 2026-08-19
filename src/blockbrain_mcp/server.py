@@ -9,10 +9,11 @@ import sys
 
 import structlog
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
 
 from .auth import build_auth_provider
 from .config import get_settings
-from .logging_setup import configure_logging
+from .logging_setup import CorrelationIdMiddleware, configure_logging
 from .tools import ALL_TOOLS
 from .well_known import register_well_known_routes
 
@@ -80,6 +81,7 @@ def main() -> None:
         host=settings.mcp_host,
         port=settings.mcp_port,
         path="/mcp",
+        middleware=[Middleware(CorrelationIdMiddleware)],
     )
 
 

@@ -6,7 +6,9 @@ import httpx
 import pytest
 import respx
 
+from blockbrain_mcp.config import get_settings
 from blockbrain_mcp.tools.read_url import read_url
+from blockbrain_mcp.url_guard import ResponseTooLargeError, UnsafeUrlError
 
 HTML_FIXTURE = """
 <!doctype html>
@@ -37,4 +39,84 @@ async def test_read_url_extracts_markdown(mock_user_context) -> None:
 
     assert page.url == "https://example.com/post"
     assert page.char_count > 0
+    assert page.truncated is False
     assert "main article body" in page.markdown
+
+
+@pytest.mark.asyncio
+async def test_read_url_reports_the_final_url_after_a_redirect(mock_user_context) -> None:
+    with respx.mock(assert_all_called=True) as router:
+        router.get("https://example.com/old").mock(
+            return_value=httpx.Response(301, headers={"location": "https://example.com/new"})
+        )
+        router.get("https://example.com/new").mock(
+            return_value=httpx.Response(200, text=HTML_FIXTURE)
+        )
+        page = await read_url(url="https://example.com/old")
+
+    assert page.url == "https://example.com/new"
+
+
+@pytest.mark.asyncio
+async def test_read_url_refuses_the_cloud_metadata_endpoint(mock_user_context) -> None:
+    with pytest.raises(UnsafeUrlError):
+        await read_url(url="https://169.254.169.254/latest/meta-data/")
+
+
+@pytest.mark.asyncio
+async def test_read_url_refuses_plain_http(mock_user_context) -> None:
+    with pytest.raises(UnsafeUrlError):
+        await read_url(url="http://example.com/post")
+
+
+@pytest.mark.asyncio
+async def test_read_url_refuses_a_redirect_into_the_private_network(mock_user_context) -> None:
+    with respx.mock(assert_all_called=True) as router:
+        router.get("https://example.com/redirector").mock(
+            return_value=httpx.Response(302, headers={"location": "https://10.0.0.5/admin"})
+        )
+        with pytest.raises(UnsafeUrlError):
+            await read_url(url="https://example.com/redirector")
+
+
+@pytest.mark.asyncio
+async def test_read_url_rejects_a_body_over_the_byte_cap(
+    mock_user_context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("READ_URL_MAX_BYTES", "500")
+    get_settings.cache_clear()
+
+    with respx.mock() as router:
+        router.get("https://example.com/huge").mock(
+            return_value=httpx.Response(200, text=HTML_FIXTURE * 200)
+        )
+        with pytest.raises(ResponseTooLargeError):
+            await read_url(url="https://example.com/huge")
+
+
+@pytest.mark.asyncio
+async def test_read_url_truncates_markdown_at_the_character_cap(
+    mock_user_context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("READ_URL_MAX_CHARS", "50")
+    get_settings.cache_clear()
+
+    with respx.mock() as router:
+        router.get("https://example.com/post").mock(
+            return_value=httpx.Response(200, text=HTML_FIXTURE)
+        )
+        page = await read_url(url="https://example.com/post")
+
+    assert page.truncated is True
+    assert page.char_count == 50
+
+
+@pytest.mark.asyncio
+async def test_read_url_honours_the_domain_allowlist(
+    mock_user_context, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("READ_URL_ALLOWED_DOMAINS", "example.com")
+    get_settings.cache_clear()
+
+    with pytest.raises(UnsafeUrlError, match="ALLOWED_DOMAINS"):
+        await read_url(url="https://elsewhere.com/post")

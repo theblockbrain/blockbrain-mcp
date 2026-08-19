@@ -111,9 +111,46 @@ class Settings(BaseSettings):
         description="Public URL Blockbrain uses to reach this server. Falls back to mcp_resource_identifier.",
     )
 
+    # -------- Discovery interop -------------------------------------------
+    mcp_advertise_scopes_in_as_metadata: bool = Field(
+        default=True,
+        description=(
+            "Also inject the resource scopes into the proxied authorization "
+            "server metadata. Their canonical home is our own RFC 9728 "
+            "Protected Resource Metadata, which is always populated; this "
+            "keeps working the clients that read scopes only from the "
+            "authorization server document. Turn it off for a document that "
+            "carries nothing beyond what the upstream IdP published."
+        ),
+    )
+    mcp_allow_default_scope: bool = Field(
+        default=False,
+        description=(
+            "Advertise `<resource>/.default` when MCP_REQUIRED_SCOPES is empty. "
+            "That asks Entra to bundle every admin-consented scope for the "
+            "resource, so pin MCP_REQUIRED_SCOPES instead wherever you can."
+        ),
+    )
+
     # -------- Tool-specific (⭐ CUSTOMIZE HERE) ----------------------------
     brave_api_key: str = Field(default="", description="Brave Search API key.")
     rate_limit_research_per_day: int = Field(default=50)
+    read_url_allowed_domains: str = Field(
+        default="",
+        description=(
+            "Comma-separated domain allow-list for read_url and research_topic. "
+            "Empty means any public host is allowed. Subdomains of a listed "
+            "domain are included."
+        ),
+    )
+    read_url_max_bytes: int = Field(
+        default=2_000_000,
+        description="Byte cap on a fetched response body.",
+    )
+    read_url_max_chars: int = Field(
+        default=100_000,
+        description="Character cap on the extracted Markdown handed back to the model.",
+    )
 
     # ---------------------------------------------------------------------
     # Derived helpers
@@ -130,6 +167,10 @@ class Settings(BaseSettings):
     @property
     def required_scopes(self) -> list[str]:
         return [s.strip() for s in self.mcp_required_scopes.split(",") if s.strip()]
+
+    @property
+    def allowed_read_domains(self) -> list[str]:
+        return [d.strip() for d in self.read_url_allowed_domains.split(",") if d.strip()]
 
     @property
     def audience(self) -> str | list[str]:

@@ -18,7 +18,7 @@ class WhoAmIResult(BaseModel):
 
 
 async def whoami() -> WhoAmIResult:
-    """Return the authenticated user's identity (from OAuth 2.1 bearer token + Blockbrain headers)."""
+    """Return the authenticated user's identity, as carried by the OAuth 2.1 bearer token."""
     ctx = get_user_context()
     return WhoAmIResult(
         user_id=ctx.user_id,
