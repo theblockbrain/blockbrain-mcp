@@ -1,23 +1,30 @@
 """
 `read_url` — fetch a URL and return its main content as Markdown.
 
+Every fetch goes through `url_guard`, which enforces https, blocks internal
+address ranges on each redirect hop, and caps the response size. Page content is
+untrusted input that lands in the model's context, so it is also length-capped.
+
 ⭐ REPLACEABLE — swap for Firecrawl, Jina Reader, or your own extraction pipeline.
    For most text-heavy HTML pages, `trafilatura` does an excellent job with zero
-   configuration; it also extracts some basic metadata.
+   configuration. It also extracts some basic metadata.
 """
 
 from __future__ import annotations
 
-import httpx
 import structlog
 import trafilatura
 from pydantic import BaseModel
 
+from ..config import get_settings
+from ..logging_setup import safe_url
+from ..url_guard import fetch_document
 from ._base import get_user_context
 
 log = structlog.get_logger(__name__)
 
-_UA = "blockbrain-mcp/0.1 (+https://github.com/)"
+_UA = "blockbrain-mcp/0.1 (+https://github.com/theblockbrain/blockbrain-mcp)"
+_TIMEOUT_SECONDS = 15.0
 
 
 class PageContent(BaseModel):
@@ -27,25 +34,29 @@ class PageContent(BaseModel):
     published: str | None = None
     markdown: str
     char_count: int
+    truncated: bool = False
 
 
 async def read_url(url: str) -> PageContent:
-    """Download a URL and return its main article content as clean Markdown.
+    """Download an https URL and return its main article content as clean Markdown.
 
     Args:
-        url: The absolute URL to fetch (http or https).
+        url: The absolute https URL to fetch. Private and reserved network
+            ranges are rejected.
     """
     user = get_user_context()
-    log.info("read_url.request", user_id=user.user_id, url=url)
+    settings = get_settings()
+    log.info("read_url.request", user_id=user.user_id, url=safe_url(url))
 
-    async with httpx.AsyncClient(
-        timeout=15.0, follow_redirects=True, headers={"User-Agent": _UA}
-    ) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        html = resp.text
+    final_url, html = await fetch_document(
+        url,
+        max_bytes=settings.read_url_max_bytes,
+        timeout=_TIMEOUT_SECONDS,
+        user_agent=_UA,
+        allowed_domains=settings.allowed_read_domains,
+    )
 
-    # trafilatura: dense, well-tuned; `output='markdown'` gives us clean headings/lists.
+    # trafilatura: dense, well-tuned. `output='markdown'` gives us clean headings/lists.
     markdown = (
         trafilatura.extract(
             html,
@@ -57,12 +68,18 @@ async def read_url(url: str) -> PageContent:
         or ""
     )
 
+    limit = settings.read_url_max_chars
+    truncated = len(markdown) > limit
+    if truncated:
+        markdown = markdown[:limit]
+
     meta = trafilatura.extract_metadata(html)
     return PageContent(
-        url=url,
+        url=final_url,
         title=meta.title if meta else None,
         author=meta.author if meta else None,
         published=meta.date if meta else None,
         markdown=markdown,
         char_count=len(markdown),
+        truncated=truncated,
     )

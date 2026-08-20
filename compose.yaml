@@ -1,8 +1,9 @@
 services:
   blockbrain-mcp:
-    # Use the pre-built image from GHCR (default).
+    # Pinned release image from GHCR (default). Never track `latest`: review the
+    # changelog, then bump this tag deliberately.
     # To build locally instead, comment out `image` and uncomment `build`.
-    image: ghcr.io/theblockbrain/blockbrain-mcp:latest
+    image: ghcr.io/theblockbrain/blockbrain-mcp:${BLOCKBRAIN_MCP_VERSION:-0.2.0}
     # build: .
 
     restart: unless-stopped
@@ -45,7 +46,16 @@ services:
       MCP_PUBLIC_BASE_URL: ${MCP_PUBLIC_BASE_URL:-}          # conditional
 
       # Comma-separated scopes the server requires on every token (e.g. mcp.access).
+      # These are published in the RFC 9728 Protected Resource Metadata.
       MCP_REQUIRED_SCOPES: ${MCP_REQUIRED_SCOPES:-}          # optional
+
+      # Also copy the scopes into the proxied authorization server metadata,
+      # for clients that ignore Protected Resource Metadata.
+      MCP_ADVERTISE_SCOPES_IN_AS_METADATA: ${MCP_ADVERTISE_SCOPES_IN_AS_METADATA:-true}   # optional
+
+      # Advertise `<resource>/.default` when no scopes are pinned. Entra then
+      # bundles every admin-consented scope, so prefer pinning MCP_REQUIRED_SCOPES.
+      MCP_ALLOW_DEFAULT_SCOPE: ${MCP_ALLOW_DEFAULT_SCOPE:-false}   # optional
 
       # ── Server ───────────────────────────────────────────────────────────
 
@@ -69,6 +79,12 @@ services:
 
       # Daily per-user cap for the research_topic tool.
       RATE_LIMIT_RESEARCH_PER_DAY: ${RATE_LIMIT_RESEARCH_PER_DAY:-50}  # optional
+
+      # read_url / research_topic fetch guard. Private and reserved address
+      # ranges are always blocked. An allow-list narrows it to known hosts.
+      READ_URL_ALLOWED_DOMAINS: ${READ_URL_ALLOWED_DOMAINS:-}   # optional
+      READ_URL_MAX_BYTES: ${READ_URL_MAX_BYTES:-2000000}        # optional
+      READ_URL_MAX_CHARS: ${READ_URL_MAX_CHARS:-100000}         # optional
 
     healthcheck:
       # The discovery endpoint responds without authentication — a 200 means

@@ -65,7 +65,7 @@ MCP_PUBLIC_BASE_URL=https://<your-public-hostname>
 MCP_REQUIRED_SCOPES=mcp.access
 ```
 
-The server validates `iss` against the explicit list — tokens from unknown
+The server validates `iss` against the explicit list. Tokens from unknown
 tenants are rejected even though Azure would issue them.
 
 Trade-offs of multi-tenant: larger attack surface, admin-consent friction
@@ -89,8 +89,15 @@ MCP_RESOURCE_IDENTIFIER=<client-id-or-custom-audience>
 # MCP_PUBLIC_BASE_URL only needed if the audience isn't an https URL
 ```
 
-Zitadel supports **RFC 7591 Dynamic Client Registration** in newer versions —
-enable it on the instance to let Blockbrain self-register.
+Zitadel supports **RFC 7591 Dynamic Client Registration** in newer versions.
+Enable it on the instance to let Blockbrain self-register.
+
+**Make sure the token carries the org and e-mail claims.** This server reads
+identity and tenant only from verified claims, never from a request header, so
+a token without `urn:zitadel:iam:org:id` gives `org_id=None` and anything
+tenant-scoped refuses the request. Blockbrain's default Zitadel setup does not
+include `email`. Add the `email` scope, or emit both through a Zitadel Action
+that sets the claims on the access token.
 
 ---
 
@@ -174,4 +181,9 @@ curl -s -X POST http://localhost:8080/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"whoami","arguments":{}}}' | jq
 ```
 
-`whoami` should return your identity (email + org/tenant ID).
+`whoami` should return your identity (email plus org/tenant ID).
+
+A `null` `org_id` or `email` means the claim is missing from the token, not
+that the server dropped it. Fix it in the provider's scope and claim
+configuration: the `X-Blockbrain-*` headers are caller-controlled and are
+deliberately not read.

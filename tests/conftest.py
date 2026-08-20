@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from collections.abc import Iterator
 from unittest.mock import patch
 
 import pytest
 
+from blockbrain_mcp.config import Settings
 from blockbrain_mcp.context import UserContext
+
+# A developer's own `.env` must not decide whether the suite passes, so settings
+# are built from the environment below and nothing else.
+Settings.model_config["env_file"] = None
 
 # Default test configuration: Entra single-tenant (the primary path).
 os.environ.setdefault("AZURE_TENANT_ID", "00000000-0000-0000-0000-000000000001")
 os.environ.setdefault("MCP_RESOURCE_IDENTIFIER", "api://blockbrain-mcp")
 os.environ.setdefault("MCP_PUBLIC_BASE_URL", "https://mcp.example.com")
 os.environ.setdefault("BRAVE_API_KEY", "test-brave-key")
+
+PUBLIC_TEST_IP = ipaddress.ip_address("93.184.216.34")
 
 
 @pytest.fixture(autouse=True)
@@ -55,3 +63,13 @@ def mock_user_context(sample_user: UserContext) -> Iterator[UserContext]:
     finally:
         for p in patches:
             p.stop()
+
+
+@pytest.fixture(autouse=True)
+def _public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the fetch guard off real DNS. Tests that care override this."""
+
+    async def _resolve(host: str, port: int) -> list:
+        return [PUBLIC_TEST_IP]
+
+    monkeypatch.setattr("blockbrain_mcp.url_guard._resolve", _resolve)

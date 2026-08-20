@@ -124,7 +124,9 @@ All variables can be set in `.env` (copied from `.env.example`). The
 | `OIDC_JWKS_URI`               | optional    | derived from issuer        | Override JWKS endpoint. Defaults to `<issuer>/.well-known/jwks.json`                         |
 | `MCP_RESOURCE_IDENTIFIER`     | required    | —                          | Value that must appear in the JWT `aud`. For Entra: the Application ID URI (`api://<id>`)    |
 | `MCP_PUBLIC_BASE_URL`         | conditional | —                          | Required when `MCP_RESOURCE_IDENTIFIER` is not an http(s) URL (Entra case). Public server URL |
-| `MCP_REQUIRED_SCOPES`         | optional    | (none)                     | Comma-separated scopes every token must carry (e.g. `mcp.access`)                            |
+| `MCP_REQUIRED_SCOPES`         | optional    | (none)                     | Comma-separated scopes every token must carry (e.g. `mcp.access`). Published in the RFC 9728 Protected Resource Metadata |
+| `MCP_ADVERTISE_SCOPES_IN_AS_METADATA` | optional | `true`              | Also copy the scopes into the proxied authorization server metadata, for clients that ignore Protected Resource Metadata |
+| `MCP_ALLOW_DEFAULT_SCOPE`     | optional    | `false`                    | Advertise `<resource>/.default` when no scopes are pinned. Entra then bundles every admin-consented scope, so pin scopes instead |
 | `MCP_SERVER_NAME`             | optional    | `Blockbrain MCP Template`  | Human-readable name advertised in MCP metadata                                                |
 | `MCP_HOST`                    | optional    | `0.0.0.0`                  | Bind address (keep `0.0.0.0` in Docker)                                                       |
 | `MCP_PORT`                    | optional    | `8080`                     | Port the server listens on                                                                     |
@@ -132,6 +134,9 @@ All variables can be set in `.env` (copied from `.env.example`). The
 | `MCP_AUTH_DISABLED`           | optional    | `false`                    | **DANGER** — disables OAuth/JWT auth entirely. Local Inspector testing only, never deployed   |
 | `BRAVE_API_KEY`               | optional    | (none)                     | Brave Search API key — only needed for `web_search` / `research_topic` tools                 |
 | `RATE_LIMIT_RESEARCH_PER_DAY` | optional    | `50`                       | Daily per-user cap for the `research_topic` tool                                              |
+| `READ_URL_ALLOWED_DOMAINS`    | optional    | (any public host)          | Comma-separated domain allow-list for `read_url` / `research_topic`. Subdomains included      |
+| `READ_URL_MAX_BYTES`          | optional    | `2000000`                  | Byte cap on a fetched response body                                                           |
+| `READ_URL_MAX_CHARS`          | optional    | `100000`                   | Character cap on the Markdown handed back to the model                                        |
 
 ---
 
@@ -269,7 +274,7 @@ unidentifiable token still raises `NotAuthenticatedError` exactly as before.
 ## Tests & linting
 
 ```bash
-make test    # uv run pytest  (23 tests: config paths, auth wiring, claims, tools)
+make test    # uv run pytest  (config paths, auth wiring, claims, fetch guard, tools)
 make lint    # uv run ruff check + format --check
 make fmt     # uv run ruff format + --fix
 ```
@@ -279,10 +284,29 @@ make fmt     # uv run ruff format + --fix
 ## Security posture
 
 - Bearer-token enforcement on every tool call (FastMCP middleware)
-- Audience validation per MCP 2025-06-18 spec (Resource Indicators, RFC 8707)
-- `X-Blockbrain-*` headers are inputs, not trust roots — JWT claims always win
-- Tokens are never logged
-- Rate limits in `research_topic` are in-memory for this template; use Redis
+- Audience validation per the MCP spec (Resource Indicators, RFC 8707)
+- **Identity and org come from verified token claims only.** The
+  `X-Blockbrain-*` request headers are set by the caller and are never read.
+  `org_id` is the tenant boundary: a token without an org claim yields
+  `org_id=None`, and `require_org_id()` refuses rather than treating the
+  request as unscoped. If your provider does not emit an org or e-mail claim,
+  add it in the provider's scope and claim configuration
+- **Outbound fetches are guarded.** `read_url` and `research_topic` accept
+  https only, reject private, loopback, link-local and other reserved address
+  ranges, re-check every redirect hop, cap the response size, and cap the text
+  handed to the model. Set `READ_URL_ALLOWED_DOMAINS` when you know the target
+  hosts. A host can still change what it resolves to between the check and the
+  connection (DNS rebinding), which the allow-list closes off
+- Page content a tool fetches is untrusted input that reaches the model's
+  context. Treat it as data, never as instructions
+- **Logs are redacted and correlated.** Secrets are dropped, e-mail local parts
+  are masked, URL query strings are stripped, and every line carries a
+  `request_id` taken from the incoming `traceparent` or `X-Request-Id`
+- `compose.yaml` pins a released image tag. Do not track `:latest`: read the
+  changelog, then bump the tag deliberately
+- CI runs ruff, pytest and a dependency audit before any image is built, and
+  scans the published image. Dependabot keeps the lockfile current
+- Rate limits in `research_topic` are in-memory for this template. Use Redis
   for production
 - `MCP_AUTH_DISABLED` is `false` by default — auth must be explicitly opted
   out of, never explicitly opted into. It's meant for local MCP Inspector
@@ -293,8 +317,10 @@ make fmt     # uv run ruff format + --fix
 
 ## References
 
-- MCP Authorization Spec (2025-06-18):
-  https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization
+- MCP Authorization Spec (2026-07-28):
+  https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization
+- Why `/.well-known/oauth-authorization-server` deviates from RFC 8414 §3.3:
+  [docs/adr/2026-08-18_well-known-authorization-server-proxy.md](docs/adr/2026-08-18_well-known-authorization-server-proxy.md)
 - FastMCP v3 docs: https://gofastmcp.com
 - Entra ID token reference:
   https://learn.microsoft.com/entra/identity-platform/access-token-claims-reference
