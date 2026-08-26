@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 
+import httpcore
 import httpx
 import pytest
 import respx
@@ -11,6 +12,8 @@ import respx
 from blockbrain_mcp.url_guard import (
     ResponseTooLargeError,
     UnsafeUrlError,
+    _PinnedResolutionBackend,
+    _PinnedTransport,
     check_url,
     check_url_target,
     fetch_document,
@@ -122,6 +125,18 @@ async def test_public_host_passes(resolve_public) -> None:
 
 
 @pytest.mark.asyncio
+async def test_check_url_target_returns_every_validated_address(resolve_public) -> None:
+    """Every resolved address is returned, not collapsed to a single pick — the
+    caller (the pinning network backend) needs the full list to fail over from
+    one dead or unroutable address to the next, the way a plain hostname
+    connection would."""
+    resolve_public([PUBLIC_IP, "8.8.8.8"])
+    host, addresses = await check_url_target("https://example.com/")
+    assert host == "example.com"
+    assert addresses == [PUBLIC_IP, "8.8.8.8"]
+
+
+@pytest.mark.asyncio
 async def test_fetch_returns_body(resolve_public) -> None:
     with respx.mock(assert_all_called=True) as router:
         router.get("https://example.com/page").mock(
@@ -131,6 +146,23 @@ async def test_fetch_returns_body(resolve_public) -> None:
 
     assert final_url == "https://example.com/page"
     assert "hello" in text
+
+
+@pytest.mark.asyncio
+async def test_idn_hostname_is_encoded_like_a_plain_fetch(resolve_public) -> None:
+    """Regression test: the request URL keeps the caller's hostname (only the
+    TCP destination is pinned), so httpx's normal IDNA encoding of a Unicode
+    hostname still runs — this used to raise `UnicodeEncodeError` when the
+    pinned IP was substituted into the request URL before encoding happened.
+    """
+    with respx.mock(assert_all_called=True) as router:
+        router.get("https://xn--mller-kva.de/p").mock(
+            return_value=httpx.Response(200, html="<p>hallo</p>")
+        )
+        final_url, text = await _fetch("https://müller.de/p")
+
+    assert final_url == "https://müller.de/p"
+    assert "hallo" in text
 
 
 @pytest.mark.asyncio
@@ -232,3 +264,126 @@ async def _fetch(url: str, *, max_bytes: int = 1_000_000, max_redirects: int = 5
         user_agent="test-agent",
         max_redirects=max_redirects,
     )
+
+
+# --- DNS-pinning transport internals -----------------------------------------
+#
+# `respx` replaces the whole transport, so it can't see which address the
+# pinning backend actually dials. The tests below exercise `_PinnedTransport`
+# and `_PinnedResolutionBackend` directly, against a fake network backend that
+# never touches a real socket, to verify the properties that matter for the
+# DNS-rebinding fix: the *hostname* — not the pinned IP — decides the
+# connection-pool key and the TLS SNI, and every validated address is tried,
+# not just the first.
+
+
+class _FakeStream:
+    """In-memory stand-in for `httpcore.AsyncNetworkStream`.
+
+    Records the TLS `server_hostname` it was asked to present and replays a
+    canned HTTP/1.1 response byte-for-byte — no real socket or TLS involved.
+    """
+
+    def __init__(self, response: bytes) -> None:
+        self._chunks = [response]
+        self.tls_server_hostname: str | None = None
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return self._chunks.pop(0) if self._chunks else b""
+
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        self.tls_server_hostname = server_hostname
+        return self
+
+    def get_extra_info(self, info: str):
+        return None
+
+
+class _FakeBackend:
+    """Records every `connect_tcp` call and hands back a scripted response."""
+
+    def __init__(self, response: bytes) -> None:
+        self._response = response
+        self.connect_calls: list[tuple[str, int]] = []
+        self.streams: list[_FakeStream] = []
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        self.connect_calls.append((host, port))
+        stream = _FakeStream(self._response)
+        self.streams.append(stream)
+        return stream
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise NotImplementedError
+
+    async def sleep(self, seconds: float) -> None:
+        pass
+
+
+_RAW_HTTP_RESPONSE = (
+    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello"
+)
+
+
+@pytest.mark.asyncio
+async def test_different_hostnames_pinned_to_the_same_ip_get_isolated_connections() -> None:
+    """Regression test for the connection-reuse gap: two different hostnames
+    that both validate to the same IP must not share a pooled connection (and
+    therefore its already-negotiated TLS identity). httpcore's pool keys on
+    the request's *hostname* origin, which pinning leaves untouched — so even
+    though both hops dial the same address, each opens (and TLS-negotiates)
+    its own connection with its own hostname's SNI.
+    """
+    fake = _FakeBackend(_RAW_HTTP_RESPONSE)
+    transport = _PinnedTransport(delegate=fake)
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        for host in ("a.example.com", "b.example.com"):
+            transport.pin(host, 443, [PUBLIC_IP])
+            request = client.build_request("GET", f"https://{host}/")
+            resp = await client.send(request)
+            assert resp.status_code == 200
+
+    assert fake.connect_calls == [(PUBLIC_IP, 443), (PUBLIC_IP, 443)]
+    assert [s.tls_server_hostname for s in fake.streams] == ["a.example.com", "b.example.com"]
+
+
+@pytest.mark.asyncio
+async def test_pinned_backend_falls_back_to_the_next_validated_address() -> None:
+    """A dead first address must not sink the whole fetch: the backend tries
+    every pinned address in order, the way a plain hostname connection would
+    via the OS resolver's own address list."""
+
+    class _FlakyDelegate:
+        def __init__(self) -> None:
+            self.attempts: list[str] = []
+
+        async def connect_tcp(
+            self, host, port, timeout=None, local_address=None, socket_options=None
+        ):
+            self.attempts.append(host)
+            if host == "203.0.113.1":
+                raise httpcore.ConnectError("unreachable")
+            return _FakeStream(_RAW_HTTP_RESPONSE)
+
+    delegate = _FlakyDelegate()
+    backend = _PinnedResolutionBackend(delegate)
+    backend.pin("example.com", 443, ["203.0.113.1", "203.0.113.2"])
+
+    stream = await backend.connect_tcp("example.com", 443)
+
+    assert delegate.attempts == ["203.0.113.1", "203.0.113.2"]
+    assert isinstance(stream, _FakeStream)
+
+
+@pytest.mark.asyncio
+async def test_pinned_backend_refuses_to_connect_without_a_pin() -> None:
+    backend = _PinnedResolutionBackend(_FakeBackend(_RAW_HTTP_RESPONSE))
+    with pytest.raises(httpcore.ConnectError):
+        await backend.connect_tcp("example.com", 443)
