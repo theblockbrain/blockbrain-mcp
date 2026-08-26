@@ -103,6 +103,25 @@ def _bracketed(ip: IpAddress) -> str:
     return f"[{ip}]" if isinstance(ip, ipaddress.IPv6Address) else str(ip)
 
 
+def _is_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _host_header_value(host: str, port: int | None) -> str:
+    """Format a `Host` header value for `host` (an IPv6 literal needs brackets)."""
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError:
+        formatted = host
+    else:
+        formatted = _bracketed(parsed)
+    return f"{formatted}:{port}" if port else formatted
+
+
 async def check_url_target(url: str, allowed_domains: list[str] | None = None) -> tuple[str, str]:
     """Validate a URL and every address its host resolves to.
 
@@ -171,13 +190,18 @@ async def fetch_document(
     internal network.
 
     Each request connects to the specific IP address that was just validated
-    (via a rewritten request URL, an explicit `Host` header, and TLS SNI set to
-    the original hostname) instead of letting httpx resolve the hostname again
-    at connect time. Without this, a host that resolves to a public address on
-    the validation lookup could resolve to an internal one on the connection's
-    own, independent lookup moments later (DNS rebinding), walking straight
-    past the check above. Pin `READ_URL_ALLOWED_DOMAINS` for extra safety when
-    the target hosts are known.
+    (via a rewritten request URL and an explicit `Host` header) instead of
+    letting httpx resolve the hostname again at connect time. Without this, a
+    host that resolves to a public address on the validation lookup could
+    resolve to an internal one on the connection's own, independent lookup
+    moments later (DNS rebinding), walking straight past the check above. Pin
+    `READ_URL_ALLOWED_DOMAINS` for extra safety when the target hosts are known.
+
+    TLS SNI is set to the original hostname too, but only when it *is* a
+    hostname: the SNI `server_name` extension (RFC 6066 §3) is defined for DNS
+    names only, so an IP-literal URL (e.g. `https://[2001:db8::1]/`) omits it
+    and falls back to the connection's default, which the TLS layer handles
+    correctly for a literal address.
     """
     current = url
     async with httpx.AsyncClient(
@@ -192,11 +216,12 @@ async def fetch_document(
             netloc = f"{pinned_address}:{parts.port}" if parts.port else pinned_address
             pinned_url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
+            extensions = {} if _is_ip_literal(host) else {"sni_hostname": host}
             request = client.build_request(
                 "GET",
                 pinned_url,
-                headers={"Host": host},
-                extensions={"sni_hostname": host},
+                headers={"Host": _host_header_value(host, parts.port)},
+                extensions=extensions,
             )
             resp = await client.send(request, stream=True)
             try:

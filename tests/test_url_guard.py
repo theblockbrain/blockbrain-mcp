@@ -158,6 +158,27 @@ async def test_connection_targets_the_validated_ip_not_the_hostname(resolve_publ
     assert sent.extensions.get("sni_hostname") == "example.com"
 
 
+PUBLIC_IPV6 = "2606:4700:4700::1111"
+
+
+@pytest.mark.asyncio
+async def test_ipv6_literal_host_gets_bracketed_host_header_and_no_sni() -> None:
+    """An IP-literal URL must get a correctly bracketed `Host` header (with the
+    port, when one is given) and no `sni_hostname` extension: TLS SNI's
+    `server_name` (RFC 6066 §3) is defined for DNS names only, never for IP
+    literals, and an unbracketed IPv6 address in `Host` is malformed.
+    """
+    with respx.mock(assert_all_called=True) as router:
+        route = router.get(
+            f"https://[{PUBLIC_IPV6}]:8443/page", headers={"host": f"[{PUBLIC_IPV6}]:8443"}
+        ).mock(return_value=httpx.Response(200, html="<p>hello</p>"))
+        await _fetch(f"https://[{PUBLIC_IPV6}]:8443/page")
+
+    sent = route.calls.last.request
+    assert sent.headers["host"] == f"[{PUBLIC_IPV6}]:8443"
+    assert "sni_hostname" not in sent.extensions
+
+
 @pytest.mark.asyncio
 async def test_redirect_to_private_address_is_blocked(resolve_public) -> None:
     with respx.mock(assert_all_called=True) as router:
