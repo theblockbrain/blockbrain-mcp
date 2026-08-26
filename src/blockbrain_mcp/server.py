@@ -12,7 +12,7 @@ from fastmcp import FastMCP
 from starlette.middleware import Middleware
 
 from .auth import build_auth_provider
-from .config import get_settings
+from .config import Settings, get_settings
 from .logging_setup import CorrelationIdMiddleware, configure_logging
 from .tools import ALL_TOOLS
 from .well_known import register_well_known_routes
@@ -35,11 +35,42 @@ _AUTH_DISABLED_BANNER = """
 
 _AUTH_DISABLED_EXPOSED_BANNER = """
 ################################################################################
-  DANGER: MCP_AUTH_DISABLED=true AND MCP_HOST=%s (not localhost-only).
-  This server is BOTH unauthenticated AND reachable from outside this machine.
-  Set MCP_HOST=127.0.0.1 for local Inspector testing, or re-enable auth.
+  REFUSING TO START: MCP_AUTH_DISABLED=true AND MCP_HOST=%s (not localhost-only).
+  That would bind a fully unauthenticated MCP endpoint to a network-facing
+  address. Set MCP_HOST=127.0.0.1 for local Inspector testing, or re-enable
+  auth. Note this only checks the bind address -- a tunnel or port-forward
+  pointed at that same localhost port is still reachable from outside this
+  machine.
 ################################################################################
 """
+
+
+class UnsafeAuthDisabledConfigError(RuntimeError):
+    """Raised when MCP_AUTH_DISABLED=true is combined with a non-localhost MCP_HOST."""
+
+
+def _refuse_unsafe_auth_disabled_bind(settings: Settings) -> None:
+    """Fail closed before we ever bind a socket for an unauthenticated server.
+
+    Lives in `main()` rather than `build_server()`: `build_server()` only
+    assembles a `FastMCP` instance and never binds an address, so an embedder
+    that builds the server and mounts `http_app()` on its own address (rather
+    than calling `main()`) isn't hard-failed by a `MCP_HOST` value it doesn't
+    even use.
+    """
+    if settings.mcp_auth_disabled and settings.mcp_host not in _LOCALHOST_ADDRESSES:
+        print(_AUTH_DISABLED_EXPOSED_BANNER % settings.mcp_host, file=sys.stderr)
+        log.error(
+            "auth.disabled.refused_to_start",
+            host=settings.mcp_host,
+            reason="auth disabled while bound to a non-localhost address",
+        )
+        raise UnsafeAuthDisabledConfigError(
+            f"MCP_AUTH_DISABLED=true and MCP_HOST={settings.mcp_host!r} is not "
+            "localhost-only. Refusing to start a fully unauthenticated, "
+            "network-reachable server. Set MCP_HOST=127.0.0.1 for local Inspector "
+            "testing, or re-enable auth."
+        )
 
 
 def build_server() -> FastMCP:
@@ -49,14 +80,6 @@ def build_server() -> FastMCP:
     if settings.mcp_auth_disabled:
         print(_AUTH_DISABLED_BANNER, file=sys.stderr)
         log.warning("auth.disabled", reason="MCP_AUTH_DISABLED=true — local testing only")
-
-        if settings.mcp_host not in _LOCALHOST_ADDRESSES:
-            print(_AUTH_DISABLED_EXPOSED_BANNER % settings.mcp_host, file=sys.stderr)
-            log.warning(
-                "auth.disabled.exposed_host",
-                host=settings.mcp_host,
-                reason="auth disabled while bound to a non-localhost address",
-            )
 
         mcp: FastMCP = FastMCP(name=settings.mcp_server_name)
     else:
@@ -75,6 +98,7 @@ def build_server() -> FastMCP:
 
 def main() -> None:
     settings = get_settings()
+    _refuse_unsafe_auth_disabled_bind(settings)
     mcp = build_server()
     mcp.run(
         transport="http",
