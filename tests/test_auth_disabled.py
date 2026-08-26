@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from blockbrain_mcp.config import get_settings
-from blockbrain_mcp.server import build_server
+from blockbrain_mcp.server import UnsafeAuthDisabledConfigError, build_server
 
 _INIT_BODY = {
     "jsonrpc": "2.0",
@@ -78,6 +78,7 @@ async def test_default_rejects_unauthenticated_call(monkeypatch: pytest.MonkeyPa
 async def test_auth_disabled_allows_unauthenticated_call(monkeypatch: pytest.MonkeyPatch) -> None:
     """MCP_AUTH_DISABLED=true -> the same request is no longer rejected for lack of a token."""
     monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    monkeypatch.setenv("MCP_HOST", "127.0.0.1")
     resp = await _post_tools_list(monkeypatch)
     assert resp.status_code == 200
     assert "WWW-Authenticate" not in resp.headers
@@ -94,9 +95,27 @@ def test_auth_disabled_skips_provider_requirement(monkeypatch: pytest.MonkeyPatc
     assert s.mcp_auth_disabled is True
 
 
+def test_auth_disabled_on_non_localhost_host_refuses_to_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MCP_AUTH_DISABLED=true + a network-reachable MCP_HOST must fail closed.
+
+    A server bound to e.g. the Docker-default 0.0.0.0 with auth off would be
+    fully unauthenticated and reachable from outside the machine -- build_server()
+    must refuse to start rather than only warn.
+    """
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    monkeypatch.setenv("MCP_HOST", "0.0.0.0")
+    get_settings.cache_clear()
+
+    with pytest.raises(UnsafeAuthDisabledConfigError, match="not localhost-only"):
+        build_server()
+
+
 def test_auth_disabled_does_not_register_well_known_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     """No upstream IdP configured/contacted in auth-disabled mode -> no proxy route."""
     monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    monkeypatch.setenv("MCP_HOST", "127.0.0.1")
     get_settings.cache_clear()
     app = build_server().http_app(path="/mcp")
     paths = [getattr(r, "path", "") for r in app.routes]
@@ -113,6 +132,7 @@ async def test_auth_disabled_whoami_call_returns_dev_identity(
     dev identity instead of raising NotAuthenticatedError.
     """
     monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    monkeypatch.setenv("MCP_HOST", "127.0.0.1")
     resp = await _post_via_handshake(_WHOAMI_CALL_BODY)
 
     assert resp.status_code == 200

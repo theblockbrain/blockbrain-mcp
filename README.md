@@ -249,12 +249,14 @@ npx @modelcontextprotocol/inspector
 ```
 
 **This is for local testing only.** With auth disabled, `/mcp` accepts
-*any* request, no token required — the server prints a loud warning banner
-on startup, and an even louder one if `MCP_HOST` is not a localhost address
-(the default `0.0.0.0` included). Never set `MCP_AUTH_DISABLED=true` in a
-deployed or network-reachable environment. Leave it unset (or `false`) for
-everything else — that is the default and enforces auth exactly like before
-this flag existed.
+*any* request, no token required — the server prints a loud warning banner on
+startup, and **refuses to start at all** if `MCP_HOST` is not a localhost
+address (the default `0.0.0.0` included), since that combination would serve
+a fully unauthenticated endpoint reachable from outside the machine. Set
+`MCP_HOST=127.0.0.1` alongside `MCP_AUTH_DISABLED=true`. Never set
+`MCP_AUTH_DISABLED=true` in a deployed or network-reachable environment.
+Leave it unset (or `false`) for everything else — that is the default and
+enforces auth exactly like before this flag existed.
 
 Tools that resolve the caller's identity (`whoami`, `web_search`, `read_url`,
 `research_topic`) still call `get_user_context()`. With auth disabled and no

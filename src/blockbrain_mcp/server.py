@@ -35,11 +35,16 @@ _AUTH_DISABLED_BANNER = """
 
 _AUTH_DISABLED_EXPOSED_BANNER = """
 ################################################################################
-  DANGER: MCP_AUTH_DISABLED=true AND MCP_HOST=%s (not localhost-only).
-  This server is BOTH unauthenticated AND reachable from outside this machine.
-  Set MCP_HOST=127.0.0.1 for local Inspector testing, or re-enable auth.
+  REFUSING TO START: MCP_AUTH_DISABLED=true AND MCP_HOST=%s (not localhost-only).
+  That would serve a fully unauthenticated MCP endpoint reachable from outside
+  this machine. Set MCP_HOST=127.0.0.1 for local Inspector testing, or
+  re-enable auth.
 ################################################################################
 """
+
+
+class UnsafeAuthDisabledConfigError(RuntimeError):
+    """Raised when MCP_AUTH_DISABLED=true is combined with a non-localhost MCP_HOST."""
 
 
 def build_server() -> FastMCP:
@@ -47,16 +52,22 @@ def build_server() -> FastMCP:
     settings = get_settings()
 
     if settings.mcp_auth_disabled:
-        print(_AUTH_DISABLED_BANNER, file=sys.stderr)
-        log.warning("auth.disabled", reason="MCP_AUTH_DISABLED=true — local testing only")
-
         if settings.mcp_host not in _LOCALHOST_ADDRESSES:
             print(_AUTH_DISABLED_EXPOSED_BANNER % settings.mcp_host, file=sys.stderr)
-            log.warning(
-                "auth.disabled.exposed_host",
+            log.error(
+                "auth.disabled.refused_to_start",
                 host=settings.mcp_host,
                 reason="auth disabled while bound to a non-localhost address",
             )
+            raise UnsafeAuthDisabledConfigError(
+                f"MCP_AUTH_DISABLED=true and MCP_HOST={settings.mcp_host!r} is not "
+                "localhost-only. Refusing to start a fully unauthenticated, "
+                "network-reachable server. Set MCP_HOST=127.0.0.1 for local Inspector "
+                "testing, or re-enable auth."
+            )
+
+        print(_AUTH_DISABLED_BANNER, file=sys.stderr)
+        log.warning("auth.disabled", reason="MCP_AUTH_DISABLED=true — local testing only")
 
         mcp: FastMCP = FastMCP(name=settings.mcp_server_name)
     else:
