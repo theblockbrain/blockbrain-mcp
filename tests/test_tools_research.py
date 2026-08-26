@@ -9,10 +9,6 @@ import respx
 from blockbrain_mcp.tools.research import research_topic
 from blockbrain_mcp.tools.web_search import BRAVE_ENDPOINT
 
-# Matches conftest.py's `_public_dns` fixture: every host resolves here, and the
-# fetch guard pins the connection to this address rather than the hostname.
-PUBLIC_IP = "93.184.216.34"
-
 
 @pytest.mark.asyncio
 async def test_research_topic_combines_search_and_read(mock_user_context) -> None:
@@ -39,12 +35,8 @@ async def test_research_topic_combines_search_and_read(mock_user_context) -> Non
                 },
             )
         )
-        router.get(f"https://{PUBLIC_IP}/", headers={"host": "a.example.com"}).mock(
-            return_value=httpx.Response(200, text=html)
-        )
-        router.get(f"https://{PUBLIC_IP}/", headers={"host": "b.example.com"}).mock(
-            return_value=httpx.Response(200, text=html)
-        )
+        router.get("https://a.example.com/").mock(return_value=httpx.Response(200, text=html))
+        router.get("https://b.example.com/").mock(return_value=httpx.Response(200, text=html))
 
         brief = await research_topic(topic="mcp", depth=2)
 

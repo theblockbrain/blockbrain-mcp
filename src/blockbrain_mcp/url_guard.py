@@ -3,12 +3,15 @@ Outbound-fetch guard for tools that follow caller-supplied URLs.
 
 Every hop is checked before a request goes out: scheme, optional domain
 allow-list, and the resolved IP addresses. The connection is then pinned to
-the address that was just validated (see `check_url_target`) rather than
-letting the HTTP client re-resolve the host, which would reopen a DNS
-rebinding gap between the check and the connect. Redirects are followed
-manually so each new location goes through the same checks, and the body is
-read with a byte cap so a large or endless response cannot fill the model's
-context.
+one of the addresses that was just validated (see `check_url_target`) via a
+custom `httpcore` network backend, rather than letting the HTTP client
+re-resolve the host, which would reopen a DNS rebinding gap between the
+check and the connect. The hostname itself stays in the request the whole
+time, so httpx's own connection-pool keying, TLS SNI, IDNA encoding, and
+`Host` header generation are untouched and still correct. Redirects are
+followed manually so each new location goes through the same checks, and the
+body is read with a byte cap so a large or endless response cannot fill the
+model's context.
 
 ⭐ CUSTOMIZE HERE — set `READ_URL_ALLOWED_DOMAINS` to pin the tool to a fixed
    set of hosts, which is the strongest option when you know them up front.
@@ -19,8 +22,9 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
+import httpcore
 import httpx
 
 _ALLOWED_SCHEMES = frozenset({"https"})
@@ -99,40 +103,19 @@ async def _resolve(host: str, port: int) -> list[IpAddress]:
     return [ipaddress.ip_address(info[4][0]) for info in infos]
 
 
-def _bracketed(ip: IpAddress) -> str:
-    return f"[{ip}]" if isinstance(ip, ipaddress.IPv6Address) else str(ip)
-
-
-def _is_ip_literal(host: str) -> bool:
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return True
-
-
-def _host_header_value(host: str, port: int | None) -> str:
-    """Format a `Host` header value for `host` (an IPv6 literal needs brackets)."""
-    try:
-        parsed = ipaddress.ip_address(host)
-    except ValueError:
-        formatted = host
-    else:
-        formatted = _bracketed(parsed)
-    return f"{formatted}:{port}" if port else formatted
-
-
-async def check_url_target(url: str, allowed_domains: list[str] | None = None) -> tuple[str, str]:
+async def check_url_target(
+    url: str, allowed_domains: list[str] | None = None
+) -> tuple[str, list[str]]:
     """Validate a URL and every address its host resolves to.
 
     A literal IP host is validated directly. All resolved addresses must be
     public, so a name with one public and one internal record is still rejected.
 
-    Returns `(host, pinned_address)`, where `pinned_address` is one of the
-    just-validated addresses, formatted for use in a URL (IPv6 bracketed).
-    The caller must connect to `pinned_address` rather than re-resolving
-    `host`, otherwise a second, independent DNS lookup at connect time could
-    return a different — and unvalidated — address (DNS rebinding).
+    Returns `(host, addresses)`, the just-validated addresses in resolution
+    order. The caller must connect directly to one of `addresses` rather than
+    letting the HTTP client re-resolve `host`, otherwise a second, independent
+    DNS lookup at connect time could return a different — and unvalidated —
+    address (DNS rebinding).
     """
     host = check_url(url, allowed_domains)
     parts = urlsplit(url)
@@ -149,8 +132,7 @@ async def check_url_target(url: str, allowed_domains: list[str] | None = None) -
             f"Host {host} resolves to a non-public address ({', '.join(unsafe)}). "
             "Fetching internal or reserved ranges is not allowed."
         )
-    pinned = next((ip for ip in addresses if isinstance(ip, ipaddress.IPv4Address)), addresses[0])
-    return host, _bracketed(pinned)
+    return host, [str(ip) for ip in addresses]
 
 
 def _check_content_type(resp: httpx.Response) -> None:
@@ -174,6 +156,84 @@ async def _read_capped(resp: httpx.Response, max_bytes: int) -> bytes:
     return bytes(body)
 
 
+class _PinnedResolutionBackend(httpcore.AsyncNetworkBackend):
+    """Dials pre-validated addresses instead of letting the resolver run again.
+
+    `fetch_document` pins the addresses `check_url_target` just validated for
+    a `(host, port)` before sending each request; `connect_tcp` then tries
+    those addresses, in order, instead of resolving `host` itself. The
+    hostname stays in the request throughout — only the TCP destination is
+    overridden — so the connection pool's key, TLS SNI, IDNA encoding, and
+    the `Host` header are all still derived by httpx/httpcore the normal way.
+    Trying every validated address (rather than pinning to a single one)
+    preserves the failover a plain hostname connection would otherwise get.
+    """
+
+    def __init__(self, delegate: httpcore.AsyncNetworkBackend | None = None) -> None:
+        self._delegate = delegate or httpcore.AnyIOBackend()
+        self._pinned: dict[tuple[str, int], list[str]] = {}
+
+    def pin(self, host: str, port: int, addresses: list[str]) -> None:
+        self._pinned[(host, port)] = addresses
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options=None,
+    ) -> httpcore.AsyncNetworkStream:
+        addresses = self._pinned.get((host, port))
+        if not addresses:
+            raise httpcore.ConnectError(f"No validated address pinned for {host}:{port}.")
+
+        last_exc: Exception | None = None
+        for address in addresses:
+            try:
+                return await self._delegate.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                last_exc = exc
+        assert last_exc is not None
+        raise last_exc
+
+    async def connect_unix_socket(
+        self, path: str, timeout: float | None = None, socket_options=None
+    ) -> httpcore.AsyncNetworkStream:
+        return await self._delegate.connect_unix_socket(
+            path, timeout=timeout, socket_options=socket_options
+        )
+
+    async def sleep(self, seconds: float) -> None:
+        await self._delegate.sleep(seconds)
+
+
+class _PinnedTransport(httpx.AsyncHTTPTransport):
+    """`AsyncHTTPTransport` whose network backend dials validated addresses.
+
+    httpx's `AsyncHTTPTransport` doesn't expose a `network_backend`
+    constructor parameter, so the underlying `httpcore.AsyncConnectionPool`
+    is built here directly (mirroring what `super().__init__()` does for the
+    no-proxy case) instead of through it, wiring in `_PinnedResolutionBackend`.
+    """
+
+    def __init__(self, *, delegate: httpcore.AsyncNetworkBackend | None = None) -> None:
+        self._pinning = _PinnedResolutionBackend(delegate)
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=httpx.create_ssl_context(),
+            network_backend=self._pinning,
+        )
+
+    def pin(self, host: str, port: int, addresses: list[str]) -> None:
+        self._pinning.pin(host, port, addresses)
+
+
 async def fetch_document(
     url: str,
     *,
@@ -189,40 +249,29 @@ async def fetch_document(
     URL it is handed, so an open redirect would otherwise walk straight into the
     internal network.
 
-    Each request connects to the specific IP address that was just validated
-    (via a rewritten request URL and an explicit `Host` header) instead of
-    letting httpx resolve the hostname again at connect time. Without this, a
-    host that resolves to a public address on the validation lookup could
-    resolve to an internal one on the connection's own, independent lookup
-    moments later (DNS rebinding), walking straight past the check above. Pin
-    `READ_URL_ALLOWED_DOMAINS` for extra safety when the target hosts are known.
-
-    TLS SNI is set to the original hostname too, but only when it *is* a
-    hostname: the SNI `server_name` extension (RFC 6066 §3) is defined for DNS
-    names only, so an IP-literal URL (e.g. `https://[2001:db8::1]/`) omits it
-    and falls back to the connection's default, which the TLS layer handles
-    correctly for a literal address.
+    Each request is sent, unmodified, for its original hostname, but the
+    transport (`_PinnedTransport`) connects to the specific address(es) that
+    were just validated instead of letting httpx resolve the hostname again
+    at connect time. Without this, a host that resolves to a public address
+    on the validation lookup could resolve to an internal one on the
+    connection's own, independent lookup moments later (DNS rebinding),
+    walking straight past the check above. Pin `READ_URL_ALLOWED_DOMAINS` for
+    extra safety when the target hosts are known.
     """
     current = url
+    transport = _PinnedTransport()
     async with httpx.AsyncClient(
+        transport=transport,
         timeout=timeout,
         follow_redirects=False,
         headers={"User-Agent": user_agent},
     ) as client:
         for _ in range(max_redirects + 1):
-            host, pinned_address = await check_url_target(current, allowed_domains)
+            _host, addresses = await check_url_target(current, allowed_domains)
 
-            parts = urlsplit(current)
-            netloc = f"{pinned_address}:{parts.port}" if parts.port else pinned_address
-            pinned_url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+            request = client.build_request("GET", current)
+            transport.pin(request.url.raw_host.decode("ascii"), request.url.port or 443, addresses)
 
-            extensions = {} if _is_ip_literal(host) else {"sni_hostname": host}
-            request = client.build_request(
-                "GET",
-                pinned_url,
-                headers={"Host": _host_header_value(host, parts.port)},
-                extensions=extensions,
-            )
             resp = await client.send(request, stream=True)
             try:
                 if resp.is_redirect:
