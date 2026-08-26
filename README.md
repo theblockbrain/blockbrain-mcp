@@ -251,9 +251,12 @@ npx @modelcontextprotocol/inspector
 **This is for local testing only.** With auth disabled, `/mcp` accepts
 *any* request, no token required — the server prints a loud warning banner on
 startup, and **refuses to start at all** if `MCP_HOST` is not a localhost
-address (the default `0.0.0.0` included), since that combination would serve
-a fully unauthenticated endpoint reachable from outside the machine. Set
-`MCP_HOST=127.0.0.1` alongside `MCP_AUTH_DISABLED=true`. Never set
+address (the default `0.0.0.0` included), since that combination would bind
+a fully unauthenticated endpoint to a network-facing address. Set
+`MCP_HOST=127.0.0.1` alongside `MCP_AUTH_DISABLED=true`. Note this check only
+looks at the bind address: if something else forwards that localhost port to
+the network (a tunnel, a container port mapping, `ssh -R`, ...), the endpoint
+is reachable from outside the machine regardless. Never set
 `MCP_AUTH_DISABLED=true` in a deployed or network-reachable environment.
 Leave it unset (or `false`) for everything else — that is the default and
 enforces auth exactly like before this flag existed.
@@ -312,8 +315,9 @@ make fmt     # uv run ruff format + --fix
   for production
 - `MCP_AUTH_DISABLED` is `false` by default — auth must be explicitly opted
   out of, never explicitly opted into. It's meant for local MCP Inspector
-  testing only and logs a loud startup warning (louder still if the server
-  isn't bound to localhost) so it can't be silently left on
+  testing only, logs a loud startup warning so it can't be silently left on,
+  and the server refuses to start at all if it's combined with a
+  non-localhost `MCP_HOST`
 
 ---
 

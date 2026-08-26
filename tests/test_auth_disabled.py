@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from blockbrain_mcp.config import get_settings
-from blockbrain_mcp.server import UnsafeAuthDisabledConfigError, build_server
+from blockbrain_mcp.server import UnsafeAuthDisabledConfigError, build_server, main
 
 _INIT_BODY = {
     "jsonrpc": "2.0",
@@ -101,15 +101,27 @@ def test_auth_disabled_on_non_localhost_host_refuses_to_start(
     """MCP_AUTH_DISABLED=true + a network-reachable MCP_HOST must fail closed.
 
     A server bound to e.g. the Docker-default 0.0.0.0 with auth off would be
-    fully unauthenticated and reachable from outside the machine -- build_server()
-    must refuse to start rather than only warn.
+    fully unauthenticated and reachable from outside the machine -- main()
+    must refuse to start (before ever binding a socket) rather than only warn.
     """
     monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
     monkeypatch.setenv("MCP_HOST", "0.0.0.0")
     get_settings.cache_clear()
 
     with pytest.raises(UnsafeAuthDisabledConfigError, match="not localhost-only"):
-        build_server()
+        main()
+
+
+def test_build_server_does_not_check_bind_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    """build_server() only assembles the app; it never binds, so it must not
+    hard-fail on MCP_HOST -- an embedder may build the server and mount
+    http_app() on an address of its own choosing.
+    """
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    monkeypatch.setenv("MCP_HOST", "0.0.0.0")
+    get_settings.cache_clear()
+
+    build_server()  # must not raise
 
 
 def test_auth_disabled_does_not_register_well_known_routes(monkeypatch: pytest.MonkeyPatch) -> None:
