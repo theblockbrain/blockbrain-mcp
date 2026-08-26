@@ -2,9 +2,13 @@
 Outbound-fetch guard for tools that follow caller-supplied URLs.
 
 Every hop is checked before a request goes out: scheme, optional domain
-allow-list, and the resolved IP addresses. Redirects are followed manually so
-each new location goes through the same checks, and the body is read with a
-byte cap so a large or endless response cannot fill the model's context.
+allow-list, and the resolved IP addresses. The connection is then pinned to
+the address that was just validated (see `check_url_target`) rather than
+letting the HTTP client re-resolve the host, which would reopen a DNS
+rebinding gap between the check and the connect. Redirects are followed
+manually so each new location goes through the same checks, and the body is
+read with a byte cap so a large or endless response cannot fill the model's
+context.
 
 ⭐ CUSTOMIZE HERE — set `READ_URL_ALLOWED_DOMAINS` to pin the tool to a fixed
    set of hosts, which is the strongest option when you know them up front.
@@ -15,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -95,11 +99,21 @@ async def _resolve(host: str, port: int) -> list[IpAddress]:
     return [ipaddress.ip_address(info[4][0]) for info in infos]
 
 
-async def check_url_target(url: str, allowed_domains: list[str] | None = None) -> None:
+def _bracketed(ip: IpAddress) -> str:
+    return f"[{ip}]" if isinstance(ip, ipaddress.IPv6Address) else str(ip)
+
+
+async def check_url_target(url: str, allowed_domains: list[str] | None = None) -> tuple[str, str]:
     """Validate a URL and every address its host resolves to.
 
     A literal IP host is validated directly. All resolved addresses must be
     public, so a name with one public and one internal record is still rejected.
+
+    Returns `(host, pinned_address)`, where `pinned_address` is one of the
+    just-validated addresses, formatted for use in a URL (IPv6 bracketed).
+    The caller must connect to `pinned_address` rather than re-resolving
+    `host`, otherwise a second, independent DNS lookup at connect time could
+    return a different — and unvalidated — address (DNS rebinding).
     """
     host = check_url(url, allowed_domains)
     parts = urlsplit(url)
@@ -116,6 +130,7 @@ async def check_url_target(url: str, allowed_domains: list[str] | None = None) -
             f"Host {host} resolves to a non-public address ({', '.join(unsafe)}). "
             "Fetching internal or reserved ranges is not allowed."
         )
+    return host, _bracketed(addresses[0])
 
 
 def _check_content_type(resp: httpx.Response) -> None:
@@ -154,9 +169,14 @@ async def fetch_document(
     URL it is handed, so an open redirect would otherwise walk straight into the
     internal network.
 
-    A host can still change what it resolves to between this check and the
-    connection (DNS rebinding). Pin `READ_URL_ALLOWED_DOMAINS` when the target
-    hosts are known.
+    Each request connects to the specific IP address that was just validated
+    (via a rewritten request URL, an explicit `Host` header, and TLS SNI set to
+    the original hostname) instead of letting httpx resolve the hostname again
+    at connect time. Without this, a host that resolves to a public address on
+    the validation lookup could resolve to an internal one on the connection's
+    own, independent lookup moments later (DNS rebinding), walking straight
+    past the check above. Pin `READ_URL_ALLOWED_DOMAINS` for extra safety when
+    the target hosts are known.
     """
     current = url
     async with httpx.AsyncClient(
@@ -165,9 +185,18 @@ async def fetch_document(
         headers={"User-Agent": user_agent},
     ) as client:
         for _ in range(max_redirects + 1):
-            await check_url_target(current, allowed_domains)
+            host, pinned_address = await check_url_target(current, allowed_domains)
 
-            request = client.build_request("GET", current)
+            parts = urlsplit(current)
+            netloc = f"{pinned_address}:{parts.port}" if parts.port else pinned_address
+            pinned_url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+            request = client.build_request(
+                "GET",
+                pinned_url,
+                headers={"Host": host},
+                extensions={"sni_hostname": host},
+            )
             resp = await client.send(request, stream=True)
             try:
                 if resp.is_redirect:

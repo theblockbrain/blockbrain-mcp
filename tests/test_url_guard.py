@@ -121,10 +121,15 @@ async def test_public_host_passes(resolve_public) -> None:
     await check_url_target("https://example.com/")
 
 
+def _pinned(path: str) -> str:
+    """The URL the client actually connects to once `example.com` is pinned."""
+    return f"https://{PUBLIC_IP}{path}"
+
+
 @pytest.mark.asyncio
 async def test_fetch_returns_body(resolve_public) -> None:
     with respx.mock(assert_all_called=True) as router:
-        router.get("https://example.com/page").mock(
+        router.get(_pinned("/page"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(200, html="<p>hello</p>")
         )
         final_url, text = await _fetch("https://example.com/page")
@@ -134,9 +139,29 @@ async def test_fetch_returns_body(resolve_public) -> None:
 
 
 @pytest.mark.asyncio
+async def test_connection_targets_the_validated_ip_not_the_hostname(resolve_public) -> None:
+    """Regression test for the DNS-rebinding TOCTOU gap: the request must be sent
+    directly to the IP address that was just validated (with `Host`/SNI set to the
+    original hostname for correct routing and certificate checks), not to the
+    hostname itself — otherwise the HTTP client would resolve it again,
+    independently, at connect time.
+    """
+    with respx.mock(assert_all_called=True) as router:
+        route = router.get(_pinned("/page"), headers={"host": "example.com"}).mock(
+            return_value=httpx.Response(200, html="<p>hello</p>")
+        )
+        await _fetch("https://example.com/page")
+
+    sent = route.calls.last.request
+    assert sent.url.host == PUBLIC_IP
+    assert sent.headers["host"] == "example.com"
+    assert sent.extensions.get("sni_hostname") == "example.com"
+
+
+@pytest.mark.asyncio
 async def test_redirect_to_private_address_is_blocked(resolve_public) -> None:
     with respx.mock(assert_all_called=True) as router:
-        router.get("https://example.com/go").mock(
+        router.get(_pinned("/go"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(
                 302, headers={"location": "https://169.254.169.254/latest/meta-data/"}
             )
@@ -148,7 +173,7 @@ async def test_redirect_to_private_address_is_blocked(resolve_public) -> None:
 @pytest.mark.asyncio
 async def test_redirect_to_http_is_blocked(resolve_public) -> None:
     with respx.mock(assert_all_called=True) as router:
-        router.get("https://example.com/go").mock(
+        router.get(_pinned("/go"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(302, headers={"location": "http://example.com/plain"})
         )
         with pytest.raises(UnsafeUrlError, match="Refusing to fetch http"):
@@ -158,10 +183,10 @@ async def test_redirect_to_http_is_blocked(resolve_public) -> None:
 @pytest.mark.asyncio
 async def test_allowed_redirect_is_followed(resolve_public) -> None:
     with respx.mock(assert_all_called=True) as router:
-        router.get("https://example.com/go").mock(
+        router.get(_pinned("/go"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(302, headers={"location": "/final"})
         )
-        router.get("https://example.com/final").mock(
+        router.get(_pinned("/final"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(200, html="<p>arrived</p>")
         )
         final_url, text = await _fetch("https://example.com/go")
@@ -173,7 +198,7 @@ async def test_allowed_redirect_is_followed(resolve_public) -> None:
 @pytest.mark.asyncio
 async def test_redirect_loop_is_capped(resolve_public) -> None:
     with respx.mock() as router:
-        router.get("https://example.com/loop").mock(
+        router.get(_pinned("/loop"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(302, headers={"location": "https://example.com/loop"})
         )
         with pytest.raises(UnsafeUrlError, match="redirects"):
@@ -183,7 +208,7 @@ async def test_redirect_loop_is_capped(resolve_public) -> None:
 @pytest.mark.asyncio
 async def test_oversized_body_is_rejected(resolve_public) -> None:
     with respx.mock() as router:
-        router.get("https://example.com/big").mock(
+        router.get(_pinned("/big"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(200, html="x" * 5_000)
         )
         with pytest.raises(ResponseTooLargeError):
@@ -193,7 +218,7 @@ async def test_oversized_body_is_rejected(resolve_public) -> None:
 @pytest.mark.asyncio
 async def test_oversized_content_length_is_rejected_before_reading(resolve_public) -> None:
     with respx.mock() as router:
-        router.get("https://example.com/big").mock(
+        router.get(_pinned("/big"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(
                 200,
                 headers={"content-type": "text/html", "content-length": "999999"},
@@ -207,7 +232,7 @@ async def test_oversized_content_length_is_rejected_before_reading(resolve_publi
 @pytest.mark.asyncio
 async def test_non_document_content_type_is_rejected(resolve_public) -> None:
     with respx.mock() as router:
-        router.get("https://example.com/blob").mock(
+        router.get(_pinned("/blob"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(
                 200, headers={"content-type": "application/octet-stream"}, content=b"\x00\x01"
             )
@@ -219,7 +244,9 @@ async def test_non_document_content_type_is_rejected(resolve_public) -> None:
 @pytest.mark.asyncio
 async def test_http_error_status_raises(resolve_public) -> None:
     with respx.mock() as router:
-        router.get("https://example.com/missing").mock(return_value=httpx.Response(404))
+        router.get(_pinned("/missing"), headers={"host": "example.com"}).mock(
+            return_value=httpx.Response(404)
+        )
         with pytest.raises(httpx.HTTPStatusError):
             await _fetch("https://example.com/missing")
 

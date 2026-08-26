@@ -10,6 +10,15 @@ from blockbrain_mcp.config import get_settings
 from blockbrain_mcp.tools.read_url import read_url
 from blockbrain_mcp.url_guard import ResponseTooLargeError, UnsafeUrlError
 
+# Matches conftest.py's `_public_dns` fixture: every host resolves here, and the
+# fetch guard pins the connection to this address rather than the hostname.
+PUBLIC_IP = "93.184.216.34"
+
+
+def _pinned(path: str) -> str:
+    return f"https://{PUBLIC_IP}{path}"
+
+
 HTML_FIXTURE = """
 <!doctype html>
 <html>
@@ -32,7 +41,7 @@ HTML_FIXTURE = """
 @pytest.mark.asyncio
 async def test_read_url_extracts_markdown(mock_user_context) -> None:
     with respx.mock(assert_all_called=True) as router:
-        router.get("https://example.com/post").mock(
+        router.get(_pinned("/post"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(200, text=HTML_FIXTURE)
         )
         page = await read_url(url="https://example.com/post")
@@ -46,10 +55,10 @@ async def test_read_url_extracts_markdown(mock_user_context) -> None:
 @pytest.mark.asyncio
 async def test_read_url_reports_the_final_url_after_a_redirect(mock_user_context) -> None:
     with respx.mock(assert_all_called=True) as router:
-        router.get("https://example.com/old").mock(
+        router.get(_pinned("/old"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(301, headers={"location": "https://example.com/new"})
         )
-        router.get("https://example.com/new").mock(
+        router.get(_pinned("/new"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(200, text=HTML_FIXTURE)
         )
         page = await read_url(url="https://example.com/old")
@@ -72,7 +81,7 @@ async def test_read_url_refuses_plain_http(mock_user_context) -> None:
 @pytest.mark.asyncio
 async def test_read_url_refuses_a_redirect_into_the_private_network(mock_user_context) -> None:
     with respx.mock(assert_all_called=True) as router:
-        router.get("https://example.com/redirector").mock(
+        router.get(_pinned("/redirector"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(302, headers={"location": "https://10.0.0.5/admin"})
         )
         with pytest.raises(UnsafeUrlError):
@@ -87,7 +96,7 @@ async def test_read_url_rejects_a_body_over_the_byte_cap(
     get_settings.cache_clear()
 
     with respx.mock() as router:
-        router.get("https://example.com/huge").mock(
+        router.get(_pinned("/huge"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(200, text=HTML_FIXTURE * 200)
         )
         with pytest.raises(ResponseTooLargeError):
@@ -102,7 +111,7 @@ async def test_read_url_truncates_markdown_at_the_character_cap(
     get_settings.cache_clear()
 
     with respx.mock() as router:
-        router.get("https://example.com/post").mock(
+        router.get(_pinned("/post"), headers={"host": "example.com"}).mock(
             return_value=httpx.Response(200, text=HTML_FIXTURE)
         )
         page = await read_url(url="https://example.com/post")
