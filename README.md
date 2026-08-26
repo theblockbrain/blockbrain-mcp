@@ -299,9 +299,10 @@ make fmt     # uv run ruff format + --fix
 - **Outbound fetches are guarded.** `read_url` and `research_topic` accept
   https only, reject private, loopback, link-local and other reserved address
   ranges, re-check every redirect hop, cap the response size, and cap the text
-  handed to the model. Set `READ_URL_ALLOWED_DOMAINS` when you know the target
-  hosts. A host can still change what it resolves to between the check and the
-  connection (DNS rebinding), which the allow-list closes off
+  handed to the model. The connection is pinned to the exact address that was
+  validated, so a host can't change what it resolves to between the check and
+  the connection (DNS rebinding). Set `READ_URL_ALLOWED_DOMAINS` when you know
+  the target hosts, to narrow this further
 - Page content a tool fetches is untrusted input that reaches the model's
   context. Treat it as data, never as instructions
 - **Logs are redacted and correlated.** Secrets are dropped, e-mail local parts

@@ -9,7 +9,8 @@ license = { text = "MIT" }
 dependencies = [
     "fastmcp>=3.2",
     "pydantic-settings>=2.14.2",
-    "httpx>=0.28",
+    "httpx>=0.28,<0.29",
+    "httpcore>=1.0",
     "trafilatura>=2.0",
     "structlog>=24.4",
     "authlib>=1.7.1",

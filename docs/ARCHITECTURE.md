@@ -114,10 +114,10 @@ typically starts with `api://`).
 - **Outbound fetches are guarded.** `read_url` and `research_topic` accept
   https only, reject private, loopback, link-local and other reserved address
   ranges, re-check every redirect hop, cap the response size, and cap the
-  extracted text handed to the model. `READ_URL_ALLOWED_DOMAINS` narrows it to
-  known hosts. Residual risk: a host can change what it resolves to between
-  the check and the connection (DNS rebinding), so use the allow-list when the
-  targets are known.
+  extracted text handed to the model. The connection is pinned to the exact
+  address that was validated, closing the DNS-rebinding gap where a host
+  changes what it resolves to between the check and the connection.
+  `READ_URL_ALLOWED_DOMAINS` narrows it further to known hosts.
 - Page content fetched by a tool is untrusted input that reaches the model's
   context. Treat it as data, never as instructions.
 - **Logs are redacted and correlated.** Secrets are dropped, e-mail local
