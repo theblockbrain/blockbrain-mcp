@@ -130,7 +130,8 @@ async def check_url_target(url: str, allowed_domains: list[str] | None = None) -
             f"Host {host} resolves to a non-public address ({', '.join(unsafe)}). "
             "Fetching internal or reserved ranges is not allowed."
         )
-    return host, _bracketed(addresses[0])
+    pinned = next((ip for ip in addresses if isinstance(ip, ipaddress.IPv4Address)), addresses[0])
+    return host, _bracketed(pinned)
 
 
 def _check_content_type(resp: httpx.Response) -> None:
