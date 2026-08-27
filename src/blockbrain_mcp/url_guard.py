@@ -13,6 +13,14 @@ followed manually so each new location goes through the same checks, and the
 body is read with a byte cap so a large or endless response cannot fill the
 model's context.
 
+`_PinnedTransport` connects directly and ignores `trust_env`, so an
+`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` in the environment is not honoured —
+fetches go straight to the pinned address rather than through the proxy.
+That preserves the pinning guarantee (a proxy would do its own DNS lookup,
+defeating it), but it is a silent behaviour change for a deployment that
+relies on an egress proxy: such fetches now go direct instead of failing
+loudly.
+
 ⭐ CUSTOMIZE HERE — set `READ_URL_ALLOWED_DOMAINS` to pin the tool to a fixed
    set of hosts, which is the strongest option when you know them up front.
 """
@@ -22,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+import time
 from urllib.parse import urlsplit
 
 import httpcore
@@ -188,13 +197,29 @@ class _PinnedResolutionBackend(httpcore.AsyncNetworkBackend):
         if not addresses:
             raise httpcore.ConnectError(f"No validated address pinned for {host}:{port}.")
 
+        # `timeout` bounds the whole connect, not each address: with several
+        # pinned addresses, an unbounded per-attempt timeout could add up to
+        # N times the caller's timeout. This only bounds the *total* time,
+        # matching a plain hostname connection's overall budget -- unlike
+        # anyio's happy-eyeballs, attempts here are sequential rather than
+        # concurrent, so a first address that hangs until its share of the
+        # deadline still starves the rest of their fair share.
+        deadline = None if timeout is None else time.monotonic() + timeout
         last_exc: Exception | None = None
         for address in addresses:
+            remaining = timeout
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    last_exc = last_exc or httpcore.ConnectTimeout(
+                        f"Timed out connecting to {host}:{port}."
+                    )
+                    break
             try:
                 return await self._delegate.connect_tcp(
                     address,
                     port,
-                    timeout=timeout,
+                    timeout=remaining,
                     local_address=local_address,
                     socket_options=socket_options,
                 )
@@ -218,17 +243,16 @@ class _PinnedTransport(httpx.AsyncHTTPTransport):
     """`AsyncHTTPTransport` whose network backend dials validated addresses.
 
     httpx's `AsyncHTTPTransport` doesn't expose a `network_backend`
-    constructor parameter, so the underlying `httpcore.AsyncConnectionPool`
-    is built here directly (mirroring what `super().__init__()` does for the
-    no-proxy case) instead of through it, wiring in `_PinnedResolutionBackend`.
+    constructor parameter, so `super().__init__()` is left to build the
+    `httpcore.AsyncConnectionPool` with httpx's usual defaults (connection
+    limits, http1/http2, retries, ...) and only the pool's network backend is
+    swapped afterwards, rather than reconstructing the pool by hand here.
     """
 
     def __init__(self, *, delegate: httpcore.AsyncNetworkBackend | None = None) -> None:
+        super().__init__()
         self._pinning = _PinnedResolutionBackend(delegate)
-        self._pool = httpcore.AsyncConnectionPool(
-            ssl_context=httpx.create_ssl_context(),
-            network_backend=self._pinning,
-        )
+        self._pool._network_backend = self._pinning
 
     def pin(self, host: str, port: int, addresses: list[str]) -> None:
         self._pinning.pin(host, port, addresses)
@@ -242,6 +266,7 @@ async def fetch_document(
     user_agent: str,
     allowed_domains: list[str] | None = None,
     max_redirects: int = 5,
+    transport: _PinnedTransport | None = None,
 ) -> tuple[str, str]:
     """Fetch a document over https and return `(final_url, text)`.
 
@@ -257,9 +282,15 @@ async def fetch_document(
     connection's own, independent lookup moments later (DNS rebinding),
     walking straight past the check above. Pin `READ_URL_ALLOWED_DOMAINS` for
     extra safety when the target hosts are known.
+
+    `transport` is a test seam: callers that mock at the HTTP layer (e.g.
+    `respx`, which replaces the transport wholesale) never exercise this
+    function's own `transport.pin(...)` call below, so tests that need to
+    verify pinning end to end can supply a `_PinnedTransport` wired to a fake
+    network backend instead.
     """
     current = url
-    transport = _PinnedTransport()
+    transport = transport or _PinnedTransport()
     async with httpx.AsyncClient(
         transport=transport,
         timeout=timeout,

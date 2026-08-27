@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 
 import httpcore
@@ -387,3 +388,63 @@ async def test_pinned_backend_refuses_to_connect_without_a_pin() -> None:
     backend = _PinnedResolutionBackend(_FakeBackend(_RAW_HTTP_RESPONSE))
     with pytest.raises(httpcore.ConnectError):
         await backend.connect_tcp("example.com", 443)
+
+
+@pytest.mark.asyncio
+async def test_fetch_document_pins_the_validated_addresses(resolve_public) -> None:
+    """`fetch_document`'s own `transport.pin(...)` call -- the one line the
+    whole DNS-rebinding fix rests on -- is invisible to every other test in
+    this file, since `respx` replaces the transport wholesale and never sees
+    it run. Inject a real `_PinnedTransport` wired to a fake backend (via the
+    `transport` seam) so this exact call path executes.
+    """
+    fake = _FakeBackend(_RAW_HTTP_RESPONSE)
+    transport = _PinnedTransport(delegate=fake)
+
+    final_url, text = await fetch_document(
+        "https://example.com/page",
+        max_bytes=1_000_000,
+        timeout=5.0,
+        user_agent="test-agent",
+        transport=transport,
+    )
+
+    assert final_url == "https://example.com/page"
+    assert text == "hello"
+    assert fake.connect_calls == [(PUBLIC_IP, 443)]
+    assert fake.streams[0].tls_server_hostname == "example.com"
+
+
+@pytest.mark.asyncio
+async def test_pinned_backend_bounds_total_connect_time_across_addresses() -> None:
+    """A shared deadline across pinned addresses, not a fresh timeout per
+    address -- otherwise N pinned addresses could take up to N times the
+    caller's timeout, unlike a plain hostname connection's happy-eyeballs.
+    """
+    seen_timeouts: list[float | None] = []
+
+    class _SlowDelegate:
+        async def connect_tcp(
+            self, host, port, timeout=None, local_address=None, socket_options=None
+        ):
+            seen_timeouts.append(timeout)
+            await asyncio.sleep(0.02)
+            raise httpcore.ConnectError("unreachable")
+
+        async def sleep(self, seconds: float) -> None:
+            pass
+
+    backend = _PinnedResolutionBackend(_SlowDelegate())
+    backend.pin("example.com", 443, ["203.0.113.1", "203.0.113.2", "203.0.113.3"])
+
+    with pytest.raises(httpcore.ConnectError):
+        await backend.connect_tcp("example.com", 443, timeout=1.0)
+
+    assert len(seen_timeouts) == 3
+    assert all(t is not None and t <= 1.0 for t in seen_timeouts)
+    # Each later attempt gets what's left of the shared 1.0s budget, not a
+    # fresh 1.0s of its own -- the clock only moves forward between attempts,
+    # so with the delegate actually consuming time, later budgets are
+    # strictly smaller.
+    assert seen_timeouts[0] == pytest.approx(1.0, abs=0.01)
+    assert seen_timeouts[0] > seen_timeouts[1] > seen_timeouts[2]
