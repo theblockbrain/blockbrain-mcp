@@ -199,8 +199,11 @@ class _PinnedResolutionBackend(httpcore.AsyncNetworkBackend):
 
         # `timeout` bounds the whole connect, not each address: with several
         # pinned addresses, an unbounded per-attempt timeout could add up to
-        # N times the caller's timeout, whereas a plain hostname connection
-        # (anyio's happy-eyeballs) bounds the total.
+        # N times the caller's timeout. This only bounds the *total* time,
+        # matching a plain hostname connection's overall budget -- unlike
+        # anyio's happy-eyeballs, attempts here are sequential rather than
+        # concurrent, so a first address that hangs until its share of the
+        # deadline still starves the rest of their fair share.
         deadline = None if timeout is None else time.monotonic() + timeout
         last_exc: Exception | None = None
         for address in addresses:

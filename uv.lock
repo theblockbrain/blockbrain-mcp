@@ -110,7 +110,7 @@ dev = [
 requires-dist = [
     { name = "authlib", specifier = ">=1.7.1" },
     { name = "fastmcp", specifier = ">=3.2" },
-    { name = "httpcore", specifier = ">=1.0" },
+    { name = "httpcore", specifier = ">=1.0,<2" },
     { name = "httpx", specifier = ">=0.28,<0.29" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "structlog", specifier = ">=24.4" },
