@@ -111,6 +111,9 @@ def main() -> None:
     mcp = build_server()
     mcp.run(
         transport="http",
+        # FastMCP's boxed startup banner (with vendor links) is plain text in
+        # an otherwise structured JSON log stream. Startup is logged anyway.
+        show_banner=False,
         host=settings.mcp_host,
         port=settings.mcp_port,
         path="/mcp",

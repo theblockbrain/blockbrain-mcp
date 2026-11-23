@@ -256,3 +256,6 @@ def test_main_enables_origin_guard_only_when_auth_is_disabled(
     main()
 
     assert [kw["host_origin_protection"] for kw in captured] == ["auto", False]
+    # Every run path (make dev, make serve, the Docker entrypoint) goes through
+    # main(), so this is the one place the banner has to be turned off.
+    assert all(kw["show_banner"] is False for kw in captured)
