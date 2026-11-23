@@ -39,6 +39,10 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # A ValidationError otherwise echoes the offending input, so a typo in
+        # e.g. RATE_LIMIT_RESEARCH_PER_DAY would print the whole environment
+        # entry, and a bad secret would land in the startup log verbatim.
+        hide_input_in_errors=True,
     )
 
     # -------- Provider: Entra ID shortcuts ---------------------------------

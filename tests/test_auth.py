@@ -91,3 +91,32 @@ def test_well_known_routes_present() -> None:
 def test_verifier_is_jwt_verifier() -> None:
     provider = build_auth_provider()
     assert isinstance(provider.token_verifier, JWTVerifier)
+
+
+def test_validation_errors_do_not_echo_secrets(monkeypatch) -> None:
+    """A config error must not print secret values from the environment.
+
+    The provider check is a model-level validator, so without
+    `hide_input_in_errors` pydantic would render the whole input dict,
+    including BRAVE_API_KEY, into the error that ends up in the startup log.
+    """
+    from pydantic import ValidationError
+
+    secret = "brave-secret-do-not-log-4711"
+    bad_port = "port-secret-do-not-log-0815"
+    monkeypatch.setenv("BRAVE_API_KEY", secret)
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-1")
+    monkeypatch.setenv("OIDC_ISSUER_URL", "https://auth.example.com")
+    monkeypatch.setenv("MCP_RESOURCE_IDENTIFIER", "api://blockbrain-mcp")
+
+    with pytest.raises(ValidationError) as model_err:
+        Settings()  # type: ignore[call-arg]
+    assert "EITHER" in str(model_err.value)
+    assert secret not in str(model_err.value)
+
+    monkeypatch.setenv("OIDC_ISSUER_URL", "")
+    monkeypatch.setenv("MCP_PORT", bad_port)
+    with pytest.raises(ValidationError) as field_err:
+        Settings()  # type: ignore[call-arg]
+    assert "mcp_port" in str(field_err.value)
+    assert bad_port not in str(field_err.value)
