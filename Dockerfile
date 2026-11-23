@@ -1,22 +1,29 @@
 # syntax=docker/dockerfile:1
 
-# Both stages start FROM the same Python image. The virtual environment built
-# in stage 1 is tied to the interpreter it was created with (its site-packages
-# path is `lib/python3.X`), so a builder and runtime on different Python minor
-# versions produce an image that fails on start with
+# Both Python stages start FROM the same Python image. The virtual environment
+# built in the builder is tied to the interpreter it was created with (its
+# site-packages path is `lib/python3.X`), so a builder and runtime on different
+# Python minor versions produce an image that fails on start with
 # `ModuleNotFoundError: No module named 'blockbrain_mcp'`. With one image
 # reference used twice, Dependabot bumps both stages in the same PR.
 # Keep the minor version in step with `.python-version` (what CI tests on).
+#
+# Base images are pinned by digest as well as tag. CI builds the image twice
+# (once to smoke-test and scan, once to push), and a floating tag could resolve
+# to a different image between the two builds. Dependabot updates the digests.
+
+# ─── uv binary ───────────────────────────────────────────────────────────────
+# A FROM stage of its own, not `COPY --from=<image>`: Dependabot only parses
+# FROM lines, so this is what keeps the uv version updated.
+FROM ghcr.io/astral-sh/uv:0.13.9@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d AS uv
 
 # ─── Stage 1: build ──────────────────────────────────────────────────────────
-FROM python:3.14-slim-bookworm AS builder
+FROM python:3.14-slim-bookworm@sha256:3fe1a0b6c2d6b2ebb572906cdabeca75aeb558c0c17db5ffefbcf8094871c32b AS builder
 
-# uv is copied in as a static binary from its own pinned image instead of
-# using a uv+Python image, so the Python version is decided only above.
-COPY --from=ghcr.io/astral-sh/uv:0.13.9 /uv /bin/uv
+# uv comes in as a static binary instead of from a uv+Python image, so the
+# Python version is decided only by the FROM line above.
+COPY --from=uv /uv /bin/uv
 
-# Use the image's interpreter, never a uv-managed download; copy files out of
-# the cache mount instead of hard-linking; precompile bytecode for startup.
 ENV UV_PYTHON_DOWNLOADS=never \
     UV_PYTHON=/usr/local/bin/python3 \
     UV_LINK_MODE=copy \
@@ -37,7 +44,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 # ─── Stage 2: runtime ────────────────────────────────────────────────────────
-FROM python:3.14-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm@sha256:3fe1a0b6c2d6b2ebb572906cdabeca75aeb558c0c17db5ffefbcf8094871c32b AS runtime
 
 WORKDIR /app
 

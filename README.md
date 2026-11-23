@@ -318,7 +318,8 @@ make fmt     # uv run ruff format + --fix
 - `compose.yaml` pins a released image tag. Do not track `:latest`: read the
   changelog, then bump the tag deliberately
 - CI runs ruff, pytest and a dependency audit before any image is built. The
-  image is started and must answer HTTP, then scanned, and only then pushed.
+  image is started and must answer HTTP before it is pushed. Trivy scans it
+  and reports to the Security tab (it does not block the push).
   Actions are pinned to commit SHAs. Dependabot keeps the lockfile current
 - Config errors never echo the offending values (`hide_input_in_errors`), so a
   typo next to a secret does not put the secret into the startup log

@@ -53,7 +53,8 @@ v2.
   formally Deprecated in 2026-07-28 and is not used here.
 - `insufficient_scope` step-up challenges (403) and the `scope` parameter in
   `WWW-Authenticate`, both driven by `RemoteAuthProvider`.
-- Tool registration via `mcp.tool(func)` makes a registry pattern trivial.
+- Tools are plain functions in `ALL_TOOLS`, passed to `FastMCP(tools=...)`,
+  which keeps the title and annotations each one declares with `@tool(...)`.
 
 ## Why Python 3.14 + uv
 
@@ -176,14 +177,17 @@ Not addressed here:
   image tag. No Helm chart or K8s manifests: customers pick their own target.
 - GitHub Actions: `ci.yml` runs ruff and pytest and audits dependencies for
   known advisories. `docker.yml` runs after `ci.yml`, builds the image
-  locally, starts it and checks that it answers HTTP, scans it with Trivy,
-  and only then logs in and pushes (never on pull requests), with an SBOM and
-  provenance. Workflows are read-only by default, only the build job gets
+  locally, starts it and checks that it answers HTTP, and only then logs in
+  and pushes (never on pull requests), with an SBOM and provenance. Trivy
+  scans the image and reports findings to the Security tab; it does not block
+  the push. Base images are pinned by digest so the pushed rebuild uses the
+  same bases as the tested build. Workflows are read-only by default, only the build job gets
   `packages: write`, checkouts do not keep the token, and every action is
   pinned to a commit SHA.
-- Dependabot for uv, GitHub Actions, and Docker. Both Dockerfile stages use
-  the same Python image, so they always move together. Python minor/major
-  bumps are manual because `.python-version` has to move with them.
+- Dependabot for uv, GitHub Actions, and Docker. Both Python stages use the
+  same digest-pinned Python image, so they always move together; Python patch
+  releases arrive as digest updates. Python minor/major bumps are manual
+  because `.python-version` has to move with them.
 
 ## What this template deliberately does **not** do
 
