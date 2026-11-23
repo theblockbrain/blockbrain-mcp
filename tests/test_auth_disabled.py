@@ -259,3 +259,66 @@ def test_main_enables_origin_guard_only_when_auth_is_disabled(
     # Every run path (make dev, make serve, the Docker entrypoint) goes through
     # main(), so this is the one place the banner has to be turned off.
     assert all(kw["show_banner"] is False for kw in captured)
+
+
+async def _post_through_main_app(
+    monkeypatch: pytest.MonkeyPatch, headers: dict[str, str]
+) -> httpx.Response:
+    """Send a request through the app `main()` would serve, with the Host/Origin
+    guard setting `main()` passes, over a loopback connection."""
+    from fastmcp import FastMCP
+
+    started: list[tuple[FastMCP, dict]] = []
+    monkeypatch.setattr(FastMCP, "run", lambda self, **kw: started.append((self, kw)))
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    monkeypatch.setenv("MCP_HOST", "127.0.0.1")
+    get_settings.cache_clear()
+    main()
+    server, kw = started[0]
+
+    app = server.http_app(path=kw["path"], host_origin_protection=kw["host_origin_protection"])
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {"_meta": _MODERN_META},
+    }
+    async with (
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8080"
+        ) as client,
+        app.router.lifespan_context(app),
+    ):
+        return await client.post(
+            "/mcp",
+            json=body,
+            headers={
+                **_MCP_HEADERS,
+                "MCP-Protocol-Version": "2026-07-28",
+                "Mcp-Method": "tools/list",
+                **headers,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_auth_disabled_accepts_a_local_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The MCP Inspector runs on localhost, so a loopback Origin must pass."""
+    resp = await _post_through_main_app(monkeypatch, {"Origin": "http://localhost:6274"})
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_auth_disabled_rejects_a_foreign_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DNS rebinding: a web page on another origin must not reach the
+    unauthenticated endpoint (transport spec: 403 on an invalid Origin)."""
+    resp = await _post_through_main_app(monkeypatch, {"Origin": "http://evil.example"})
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_auth_disabled_rejects_a_foreign_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rebound DNS name arrives with its own Host header; the guard answers
+    421 Misdirected Request before the request reaches MCP."""
+    resp = await _post_through_main_app(monkeypatch, {"Host": "evil.example"})
+    assert resp.status_code == 421
