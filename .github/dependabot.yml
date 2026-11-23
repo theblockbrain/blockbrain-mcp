@@ -21,3 +21,14 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      docker-images:
+        patterns: ["*"]
+    # Both Dockerfile stages use the same `python:<minor>-slim-bookworm` image,
+    # so Dependabot always moves them together. A new Python minor or major
+    # is still ignored here: it also has to change `.python-version` (what CI
+    # tests on), so it is a deliberate, manual bump. Patch updates and uv
+    # (copied in from its own image) keep flowing automatically.
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
