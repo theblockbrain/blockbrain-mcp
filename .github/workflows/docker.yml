@@ -7,10 +7,9 @@ on:
     branches: ["main"]
     tags: ["v*"]
 
+# Read-only by default. Only the build job below gets the write scopes it needs.
 permissions:
   contents: read
-  packages: write
-  security-events: write
 
 jobs:
   ci:
@@ -18,20 +17,27 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   build:
-    name: Build & push
+    name: Build, test & push
     needs: ci
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to GHCR (non-PR events only)
+      security-events: write # upload the Trivy SARIF
+      actions: read # upload-sarif reads the workflow run (required in private repos)
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/theblockbrain/blockbrain-mcp
           tags: |
@@ -41,39 +47,94 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build (and push on non-PR)
-        id: build
-        uses: docker/build-push-action@v7
+      # Build once into the local Docker daemon. Nothing is pushed until the
+      # smoke test has passed against this image. Base images are pinned by
+      # digest in the Dockerfile, so the push build below resolves the same
+      # bases and, via the GHA cache, normally the same layers.
+      - name: Build (local, not pushed)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
-          load: ${{ github.event_name == 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          sbom: ${{ github.event_name != 'pull_request' }}
-          provenance: ${{ github.event_name != 'pull_request' }}
+          load: true
+          push: false
+          tags: blockbrain-mcp:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Start the real entrypoint in auth mode with a dummy tenant and check
+      # that it answers HTTP. Serving the protected resource metadata needs no
+      # call to the IdP, so this works offline. An import check alone would not
+      # have caught the builder/runtime Python mismatch that shipped before.
+      - name: Smoke test image
+        run: |
+          docker run -d --name mcp-smoke -p 127.0.0.1:8080:8080 \
+            -e AZURE_TENANT_ID=00000000-0000-0000-0000-000000000001 \
+            -e MCP_RESOURCE_IDENTIFIER=api://blockbrain-mcp-ci \
+            -e MCP_PUBLIC_BASE_URL=http://localhost:8080 \
+            -e MCP_REQUIRED_SCOPES=mcp.access \
+            blockbrain-mcp:ci
+          trap 'docker logs mcp-smoke; docker rm -f mcp-smoke >/dev/null' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/.well-known/oauth-protected-resource/mcp -o prm.json; then
+              break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' mcp-smoke)" != "true" ]; then
+              echo "::error::container exited before serving HTTP"
+              exit 1
+            fi
+            sleep 1
+          done
+          cat prm.json && echo
+          grep -q '"resource":"http://localhost:8080/mcp"' prm.json
+          grep -q 'api://blockbrain-mcp-ci/mcp.access' prm.json
+          # An unauthenticated MCP request must be refused.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/mcp \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+          test "$code" = 401
+          echo "smoke test ok"
+
       - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          image-ref: blockbrain-mcp:ci
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
 
+      # Trivy reports, it does not gate: it runs with its default exit code 0,
+      # so findings show up in the Security tab without blocking a push on a
+      # base-image CVE nobody can fix yet. Uploading SARIF needs GitHub Code
+      # Security in private repos; without it this step errors, so it must not
+      # fail the build.
       - name: Upload scan results
         if: always()
-        uses: github/codeql-action/upload-sarif@v4
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: trivy-results.sarif
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Second build hits the layer cache from the first one, so it is cheap.
+      # It is a rebuild, not a push of the tested image (the tested one has no
+      # SBOM or provenance attached); the digest-pinned bases keep them aligned.
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: true
+          cache-from: type=gha

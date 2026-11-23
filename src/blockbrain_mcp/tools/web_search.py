@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import httpx
 import structlog
+from fastmcp.tools import tool
 from pydantic import BaseModel, Field
 
 from ..config import get_settings
@@ -34,6 +35,10 @@ class SearchResponse(BaseModel):
     results: list[SearchResult]
 
 
+@tool(
+    title="Web search",
+    annotations={"readOnlyHint": True, "openWorldHint": True},
+)
 async def web_search(query: str, max_results: int = 5) -> SearchResponse:
     """Search the web via Brave Search. Returns a list of result cards.
 

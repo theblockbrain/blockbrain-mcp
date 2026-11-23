@@ -16,7 +16,9 @@ What you get:
 - Modular tool registry — `whoami`, `web_search`, `read_url`, `research_topic`
   as swap-out examples
 - `⭐ CUSTOMIZE HERE` markers at every extension point
-- 23 unit tests + local cloudflared tunnel integration
+- Speaks MCP **2026-07-28** (stateless, no session) and still serves
+  2025-era clients from the same endpoint (FastMCP 4 / MCP Python SDK v2)
+- Unit tests that drive the real ASGI app + local cloudflared tunnel integration
 
 ---
 
@@ -45,7 +47,7 @@ comment out the `image:` line and uncomment `build: .`, then run
 ### Option B — uv (local dev + cloudflared tunnel)
 
 ```bash
-# prerequisites: Python 3.12, uv, cloudflared
+# prerequisites: Python 3.14 (see .python-version), uv, cloudflared
 brew install uv cloudflared
 
 uv sync
@@ -185,6 +187,7 @@ blockbrain-mcp/
 │   ├── server.py          # main entry; assembles FastMCP
 │   ├── config.py          # ⭐ CUSTOMIZE HERE for new env vars
 │   ├── auth.py            # JWTVerifier + RemoteAuthProvider
+│   ├── well_known.py      # /.well-known/oauth-authorization-server proxy
 │   ├── context.py         # JWT/header → UserContext (Entra/Zitadel/OIDC claims)
 │   ├── logging_setup.py   # structlog JSON
 │   └── tools/
@@ -194,7 +197,7 @@ blockbrain-mcp/
 │       ├── web_search.py  # ⭐ REPLACEABLE
 │       ├── read_url.py    # ⭐ REPLACEABLE
 │       └── research.py    # ⭐ REPLACEABLE — example composite
-├── tests/                 # pytest, 23 tests
+├── tests/                 # pytest
 ├── docs/
 │   ├── ARCHITECTURE.md    # deeper design dive
 │   ├── PROVIDERS.md       # Entra / Zitadel / Auth0 / Okta / Keycloak setup
@@ -220,7 +223,8 @@ make dev &                                     # starts the server
 curl -s http://localhost:8080/.well-known/oauth-protected-resource/mcp | jq
 # → JSON listing your Entra tenant's issuer as authorization_servers
 
-# Unauthenticated call — must return 401 with WWW-Authenticate header
+# Unauthenticated call — must return 401 with a WWW-Authenticate header that
+# names the scope to request and the resource metadata URL
 curl -s -i -X POST http://localhost:8080/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
@@ -288,7 +292,10 @@ make fmt     # uv run ruff format + --fix
 
 ## Security posture
 
-- Bearer-token enforcement on every tool call (FastMCP middleware)
+- Bearer-token enforcement on every tool call (FastMCP middleware). The
+  `WWW-Authenticate` challenge names the scope a client must request, and a
+  valid token without a required scope gets 403 `insufficient_scope`, so the
+  client can step up instead of treating the token as broken
 - Audience validation per the MCP spec (Resource Indicators, RFC 8707)
 - **Identity and org come from verified token claims only.** The
   `X-Blockbrain-*` request headers are set by the caller and are never read.
@@ -310,8 +317,12 @@ make fmt     # uv run ruff format + --fix
   `request_id` taken from the incoming `traceparent` or `X-Request-Id`
 - `compose.yaml` pins a released image tag. Do not track `:latest`: read the
   changelog, then bump the tag deliberately
-- CI runs ruff, pytest and a dependency audit before any image is built, and
-  scans the published image. Dependabot keeps the lockfile current
+- CI runs ruff, pytest and a dependency audit before any image is built. The
+  image is started and must answer HTTP before it is pushed. Trivy scans it
+  and reports to the Security tab (it does not block the push).
+  Actions are pinned to commit SHAs. Dependabot keeps the lockfile current
+- Config errors never echo the offending values (`hide_input_in_errors`), so a
+  typo next to a secret does not put the secret into the startup log
 - Rate limits in `research_topic` are in-memory for this template. Use Redis
   for production
 - `MCP_AUTH_DISABLED` is `false` by default — auth must be explicitly opted
@@ -326,9 +337,11 @@ make fmt     # uv run ruff format + --fix
 
 - MCP Authorization Spec (2026-07-28):
   https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization
+- MCP 2026-07-28 changelog:
+  https://modelcontextprotocol.io/specification/2026-07-28/changelog
 - Why `/.well-known/oauth-authorization-server` deviates from RFC 8414 §3.3:
   [docs/adr/2026-08-18_well-known-authorization-server-proxy.md](docs/adr/2026-08-18_well-known-authorization-server-proxy.md)
-- FastMCP v3 docs: https://gofastmcp.com
+- FastMCP v4 docs: https://gofastmcp.com
 - Entra ID token reference:
   https://learn.microsoft.com/entra/identity-platform/access-token-claims-reference
 - RFC 9728 — OAuth 2.0 Protected Resource Metadata

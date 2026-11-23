@@ -25,6 +25,7 @@ import time
 from collections import defaultdict
 
 import structlog
+from fastmcp.tools import tool
 from pydantic import BaseModel
 
 from ..config import get_settings
@@ -61,6 +62,10 @@ def _check_and_increment_quota(user_id: str) -> None:
     _DAY_BUCKETS[key] += 1
 
 
+@tool(
+    title="Research a topic",
+    annotations={"readOnlyHint": True, "openWorldHint": True},
+)
 async def research_topic(topic: str, depth: int = 3) -> ResearchBrief:
     """Search the web for a topic, read the top N results, and return a combined brief.
 
