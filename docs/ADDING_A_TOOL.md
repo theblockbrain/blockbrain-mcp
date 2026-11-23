@@ -14,11 +14,13 @@ function into an MCP tool by reading its type hints and docstring."
 The docstring on `my_tool` below becomes the description the LLM sees.
 Argument names and types become the tool's input schema.
 The pydantic return model becomes the tool's output schema.
+`@tool(...)` adds the display title and behaviour hints clients show to users.
 """
 
 from __future__ import annotations
 
 import structlog
+from fastmcp.tools import tool
 from pydantic import BaseModel
 
 from ._base import get_user_context
@@ -31,6 +33,11 @@ class MyResult(BaseModel):
     user_email: str | None
 
 
+@tool(
+    title="Echo a message",
+    # Hints, not guarantees: read-only, safe to retry, no outside systems.
+    annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
+)
 async def my_tool(message: str) -> MyResult:
     """Echo a message, attributed to the authenticated user.
 
@@ -54,6 +61,14 @@ ALL_TOOLS = [whoami, my_tool]
 ```
 
 Drop whichever of `web_search`, `read_url`, `research_topic` you do not want.
+`server.py` passes `ALL_TOOLS` to `FastMCP(tools=...)`, which keeps the
+`@tool(...)` metadata. `@tool` returns your plain function, so tests and
+composite tools can still call it directly.
+
+Pick the annotations honestly: `readOnlyHint` for tools that change nothing,
+`destructiveHint` for tools that delete or overwrite, `idempotentHint` when a
+retry with the same arguments has no extra effect, and `openWorldHint` when
+the tool talks to systems outside your control (the web, a third-party API).
 
 ## 3. Test it
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import structlog
 import trafilatura
+from fastmcp.tools import tool
 from pydantic import BaseModel
 
 from ..config import get_settings
@@ -37,6 +38,10 @@ class PageContent(BaseModel):
     truncated: bool = False
 
 
+@tool(
+    title="Read URL",
+    annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
+)
 async def read_url(url: str) -> PageContent:
     """Download an https URL and return its main article content as clean Markdown.
 

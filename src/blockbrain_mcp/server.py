@@ -6,6 +6,7 @@ To change auth, edit `auth.py`. To change env vars, edit `config.py`.
 """
 
 import sys
+from importlib.metadata import PackageNotFoundError, version
 
 import structlog
 from fastmcp import FastMCP
@@ -73,6 +74,13 @@ def _refuse_unsafe_auth_disabled_bind(settings: Settings) -> None:
         )
 
 
+def _server_version() -> str:
+    try:
+        return version("blockbrain-mcp")
+    except PackageNotFoundError:  # running from a source tree that was never installed
+        return "0.0.0"
+
+
 def build_server() -> FastMCP:
     configure_logging()
     settings = get_settings()
@@ -81,15 +89,16 @@ def build_server() -> FastMCP:
         print(_AUTH_DISABLED_BANNER, file=sys.stderr)
         log.warning("auth.disabled", reason="MCP_AUTH_DISABLED=true — local testing only")
 
-        mcp: FastMCP = FastMCP(name=settings.mcp_server_name)
-    else:
-        mcp = FastMCP(
-            name=settings.mcp_server_name,
-            auth=build_auth_provider(),
-        )
-
-    for tool_fn in ALL_TOOLS:
-        mcp.tool(tool_fn)
+    # `version` ends up in `serverInfo`, which 2026-07-28 clients read from
+    # `server/discover` and from every result's `_meta`. Passing the tools to
+    # the constructor (rather than `mcp.tool(fn)`) keeps the title and
+    # annotations each tool declares with `@tool(...)` in its own module.
+    mcp = FastMCP(
+        name=settings.mcp_server_name,
+        version=_server_version(),
+        auth=None if settings.mcp_auth_disabled else build_auth_provider(),
+        tools=ALL_TOOLS,
+    )
 
     if not settings.mcp_auth_disabled:
         register_well_known_routes(mcp)
@@ -106,6 +115,14 @@ def main() -> None:
         port=settings.mcp_port,
         path="/mcp",
         middleware=[Middleware(CorrelationIdMiddleware)],
+        # The transport spec requires Origin validation (403 on a foreign
+        # Origin) against DNS rebinding. "auto" enforces Host and Origin
+        # checks whenever the server is reached over loopback, which is the
+        # only way the unauthenticated MCP_AUTH_DISABLED mode can run. With
+        # auth on, a rebinding page cannot attach the bearer token, and a
+        # strict Host check would reject the public hostname a tunnel or
+        # reverse proxy forwards, so it stays off there.
+        host_origin_protection="auto" if settings.mcp_auth_disabled else False,
     )
 
 

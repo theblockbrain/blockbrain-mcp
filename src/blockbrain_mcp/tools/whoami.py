@@ -5,6 +5,7 @@ Keep this tool in production. It is invaluable when debugging auth wiring:
 if `whoami` returns your email, the OAuth flow is working end-to-end.
 """
 
+from fastmcp.tools import tool
 from pydantic import BaseModel
 
 from ._base import get_user_context
@@ -17,6 +18,10 @@ class WhoAmIResult(BaseModel):
     message: str
 
 
+@tool(
+    title="Who am I",
+    annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
+)
 async def whoami() -> WhoAmIResult:
     """Return the authenticated user's identity, as carried by the OAuth 2.1 bearer token."""
     ctx = get_user_context()

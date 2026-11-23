@@ -19,7 +19,7 @@ _INIT_BODY = {
     "id": 0,
     "method": "initialize",
     "params": {
-        "protocolVersion": "2025-06-18",
+        "protocolVersion": "2025-11-25",
         "capabilities": {},
         "clientInfo": {"name": "test-client", "version": "0"},
     },
@@ -38,7 +38,7 @@ _MCP_HEADERS = {
 
 
 async def _post_via_handshake(body: dict) -> httpx.Response:
-    """Drive the real streamable-HTTP handshake (initialize -> `body`), with
+    """Drive the legacy (2025-11-25 and earlier) streamable-HTTP handshake (initialize -> `body`), with
     no Authorization header on either request, and return the response to
     the second request.
 
@@ -152,3 +152,107 @@ async def test_auth_disabled_whoami_call_returns_dev_identity(
     assert '"isError":false' in body
     assert '"user_id":"local-dev"' in body
     assert '"email":"dev@localhost"' in body
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-28: no handshake, no session. Every request carries its own
+# protocol version and client capabilities in `_meta`.
+# ---------------------------------------------------------------------------
+
+_MODERN_META = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientCapabilities": {},
+    "io.modelcontextprotocol/clientInfo": {"name": "test-client", "version": "0"},
+}
+
+
+async def _post_stateless(method: str, params: dict | None = None) -> httpx.Response:
+    get_settings.cache_clear()
+    app = build_server().http_app(path="/mcp")
+    headers = {**_MCP_HEADERS, "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": method}
+    if params and "name" in params:
+        headers["Mcp-Name"] = params["name"]
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": {**(params or {}), "_meta": _MODERN_META},
+    }
+    async with (
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+        app.router.lifespan_context(app),
+    ):
+        return await client.post("/mcp", json=body, headers=headers)
+
+
+@pytest.mark.asyncio
+async def test_stateless_protocol_serves_discover_with_server_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    monkeypatch.setenv("MCP_HOST", "127.0.0.1")
+    resp = await _post_stateless("server/discover")
+
+    assert resp.status_code == 200, resp.text
+    assert "mcp-session-id" not in resp.headers
+    result = resp.json()["result"]
+    assert "2026-07-28" in result["supportedVersions"]
+    server_info = result["_meta"]["io.modelcontextprotocol/serverInfo"]
+    assert server_info["name"] == get_settings().mcp_server_name
+    assert server_info["version"] != "0.0.0"
+
+
+@pytest.mark.asyncio
+async def test_stateless_protocol_lists_tools_with_titles_and_annotations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    monkeypatch.setenv("MCP_HOST", "127.0.0.1")
+    resp = await _post_stateless("tools/list")
+
+    assert resp.status_code == 200, resp.text
+    tools = {t["name"]: t for t in resp.json()["result"]["tools"]}
+    assert list(tools) == ["whoami", "web_search", "read_url", "research_topic"]
+    for tool in tools.values():
+        assert tool["title"]
+        assert tool["annotations"]["readOnlyHint"] is True
+        assert "outputSchema" in tool
+    assert tools["whoami"]["annotations"]["openWorldHint"] is False
+    assert tools["read_url"]["annotations"]["openWorldHint"] is True
+
+
+@pytest.mark.asyncio
+async def test_stateless_protocol_calls_a_tool_without_a_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    monkeypatch.setenv("MCP_HOST", "127.0.0.1")
+    resp = await _post_stateless("tools/call", {"name": "whoami", "arguments": {}})
+
+    assert resp.status_code == 200, resp.text
+    result = resp.json()["result"]
+    assert result["isError"] is False
+    assert result["structuredContent"]["user_id"] == "local-dev"
+
+
+def test_main_enables_origin_guard_only_when_auth_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The transport spec requires Origin validation. With auth off (loopback
+    only) FastMCP's guard runs in "auto" mode; with auth on it stays off so a
+    tunnel or reverse proxy forwarding the public Host keeps working."""
+    from fastmcp import FastMCP
+
+    captured: list[dict] = []
+    monkeypatch.setattr(FastMCP, "run", lambda self, **kw: captured.append(kw))
+
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
+    monkeypatch.setenv("MCP_HOST", "127.0.0.1")
+    get_settings.cache_clear()
+    main()
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "false")
+    monkeypatch.setenv("MCP_HOST", "0.0.0.0")
+    get_settings.cache_clear()
+    main()
+
+    assert [kw["host_origin_protection"] for kw in captured] == ["auto", False]
