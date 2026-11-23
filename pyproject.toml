@@ -7,22 +7,22 @@ requires-python = ">=3.12"
 authors = [{ name = "Blockbrain" }]
 license = { text = "MIT" }
 dependencies = [
-    "fastmcp>=3.2",
-    "pydantic-settings>=2.14.2",
+    "fastmcp>=4.2.5,<5",
+    "pydantic-settings>=2.16.3",
     "httpx>=0.28,<0.29",
     "httpcore>=1.0",
-    "trafilatura>=2.0",
+    "trafilatura>=2.4",
     "structlog>=24.4",
-    "authlib>=1.7.1",
+    "authlib>=1.9.10",
 ]
 
 [dependency-groups]
 dev = [
-    "pytest>=8",
-    "pytest-asyncio>=0.25",
-    "ruff>=0.8",
+    "pytest>=9.2",
+    "pytest-asyncio>=1.5",
+    "ruff>=0.17.6",
     "respx>=0.22",
-    "pyjwt[crypto]>=2.13.0",
+    "pyjwt[crypto]>=2.15.1",
     "pip-audit>=2.9",
 ]
 
@@ -46,5 +46,6 @@ ignore = ["E501"]  # line length enforced by formatter
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
