@@ -15,7 +15,7 @@
 # ─── uv binary ───────────────────────────────────────────────────────────────
 # A FROM stage of its own, not `COPY --from=<image>`: Dependabot only parses
 # FROM lines, so this is what keeps the uv version updated.
-FROM ghcr.io/astral-sh/uv:0.13.9@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d AS uv
+FROM ghcr.io/astral-sh/uv:0.13.10@sha256:a3ea1357342c1a4bf9a0c53a3deb1b55379aefa037338d8113d5771efa01774f AS uv
 
 # ─── Stage 1: build ──────────────────────────────────────────────────────────
 FROM python:3.14-slim-bookworm@sha256:3fe1a0b6c2d6b2ebb572906cdabeca75aeb558c0c17db5ffefbcf8094871c32b AS builder
